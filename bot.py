@@ -95,9 +95,10 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД (ФИНАЛЬНАЯ ВЕРСИЯ) =====
+# ===== QR-КОД (ИСПРАВЛЕННАЯ ВЕРСИЯ) =====
 async def generate_qr_code(user_id):
     try:
+        # Создаем клиент с пустой сессией
         client = TelegramClient(
             StringSession(),
             API_ID, API_HASH,
@@ -106,6 +107,8 @@ async def generate_qr_code(user_id):
             app_version="4.16.30"
         )
         await client.connect()
+        
+        # Создаем QR логин
         qr_login = await client.qr_login()
         
         user = get_user_data(user_id)
@@ -116,6 +119,7 @@ async def generate_qr_code(user_id):
         }
         user['qr_checked'] = False
         
+        # Генерируем QR код
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(qr_login.url)
         qr.make(fit=True)
@@ -136,9 +140,32 @@ async def check_qr_login(user_id):
         return False, "QR-сессия не найдена"
     
     try:
-        # 1. Сразу проверяем авторизацию
-        if await qr_data['client'].is_user_authorized():
-            client = qr_data['client']
+        client = qr_data['client']
+        qr_login = qr_data['qr_login']
+        
+        # Пытаемся получить результат авторизации
+        try:
+            result = await qr_login.wait(timeout=1)
+            if result is not None:
+                # Успешный вход!
+                session_string = client.session.save()
+                user['client'] = client
+                user['session'] = session_string
+                user['qr_checked'] = True
+                
+                with open(f'session_string_{user_id}.txt', 'w') as f:
+                    f.write(session_string)
+                
+                user['qr_session'] = None
+                return True, "✅ Вход по QR-коду успешен!"
+        except asyncio.TimeoutError:
+            pass
+        except Exception as e:
+            # Если ошибка, проверяем авторизацию
+            pass
+        
+        # Проверяем, не авторизован ли уже клиент
+        if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
             user['session'] = session_string
@@ -150,27 +177,12 @@ async def check_qr_login(user_id):
             user['qr_session'] = None
             return True, "✅ Вход по QR-коду успешен!"
         
-        # 2. Пробуем получить результат через wait
-        try:
-            result = await qr_data['qr_login'].wait()
-            if result is not None:
-                client = qr_data['client']
-                session_string = client.session.save()
-                user['client'] = client
-                user['session'] = session_string
-                user['qr_checked'] = True
-                
-                with open(f'session_string_{user_id}.txt', 'w') as f:
-                    f.write(session_string)
-                
-                user['qr_session'] = None
-                return True, "✅ Вход по QR-коду успешен!"
-        except:
-            pass
-        
         return False, "⏳ Ожидание сканирования..."
+        
+    except errors.rpcerrorlist.PhoneNumberInvalidError:
+        return False, "❌ QR-код устарел. Сгенерируйте новый."
     except Exception as e:
-        # 3. При ошибке - проверяем авторизацию
+        # Проверяем авторизацию в любом случае
         try:
             if await qr_data['client'].is_user_authorized():
                 client = qr_data['client']
@@ -191,56 +203,36 @@ async def check_qr_login(user_id):
 async def check_qr_status(query, user_id):
     user = get_user_data(user_id)
     
-    # Проверяем 20 раз с интервалом 2 секунды
-    for i in range(20):
+    # Проверяем каждые 2 секунды, максимум 30 раз (60 секунд)
+    for i in range(30):
         await asyncio.sleep(2)
         
-        # Проверка 1: через is_user_ready
-        if user.get('client') and await is_user_ready(user_id):
-            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-            return
-        
-        # Проверка 2: через check_qr_login
+        # Проверяем статус QR входа
         success, msg = await check_qr_login(user_id)
+        
         if success:
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+            # Показываем главное меню
+            await show_main_menu_with_query(query, user_id)
             return
         
-        # Проверка 3: если есть сессия
-        if user.get('session'):
-            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-            return
-        
-        # Проверка 4: пробуем создать клиент и проверить
+        # Обновляем сообщение о статусе каждые 5 проверок
+        if i % 5 == 0 and i > 0:
+            try:
+                await query.message.edit_text(f"⏳ Ожидание сканирования... ({i*2} сек)")
+            except:
+                pass
+    
+    # Если не удалось
+    await query.message.reply_text("⏰ QR-код истек. Попробуйте снова.")
+    
+    # Удаляем старую сессию
+    if user.get('qr_session'):
         try:
-            test_client = TelegramClient(
-                StringSession(),
-                API_ID, API_HASH,
-                device_model="Desktop",
-                system_version="Windows 10",
-                app_version="4.16.30"
-            )
-            await test_client.connect()
-            if await test_client.is_user_authorized():
-                session_string = test_client.session.save()
-                user['client'] = test_client
-                user['session'] = session_string
-                user['qr_checked'] = True
-                
-                with open(f'session_string_{user_id}.txt', 'w') as f:
-                    f.write(session_string)
-                
-                await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-                return
+            await user['qr_session']['client'].disconnect()
         except:
             pass
-    
-    # Последняя проверка
-    if await is_user_ready(user_id):
-        await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-        return
-    
-    await query.message.reply_text("⏰ QR-код истек. Попробуйте снова.")
+        user['qr_session'] = None
 
 async def get_qr_instructions():
     return """
@@ -380,6 +372,44 @@ async def show_main_menu(update, context, is_callback=False):
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
+
+async def show_main_menu_with_query(query, user_id):
+    """Показывает главное меню после успешного входа"""
+    keyboard = [
+        [InlineKeyboardButton("📱 Вход по QR", callback_data='qr_login')],
+        [InlineKeyboardButton("📱 Инструкция QR", callback_data='qr_help')],
+        [InlineKeyboardButton("📱 Вход по номеру", callback_data='phone_login')],
+        [InlineKeyboardButton("➕ Добавить группу", callback_data='add_group')],
+        [InlineKeyboardButton("📝 Установить сообщение", callback_data='set_msg')],
+        [InlineKeyboardButton("🚀 Запустить рассылку", callback_data='start_spam')],
+        [InlineKeyboardButton("🛑 Остановить рассылку", callback_data='stop_spam')],
+        [InlineKeyboardButton("📊 Статус", callback_data='status')],
+        [InlineKeyboardButton("📋 Список групп", callback_data='groups')],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        f"🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
+        f"✅ Аккаунт подключен\n\n"
+        "✅ Вы успешно активировали бота!\n"
+        "Теперь вам доступны все функции.\n\n"
+        f"📨 Подпись в сообщениях: [🤖 Бот]({BOT_LINK})"
+    )
+    
+    if os.path.exists(PHOTO_PATH):
+        with open(PHOTO_PATH, 'rb') as photo:
+            await query.message.reply_photo(
+                photo=photo,
+                caption=text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+    else:
+        await query.message.reply_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 # ===== ПЕРВОЕ СООБЩЕНИЕ =====
 async def show_subscription_required(update, is_callback=False):
@@ -789,6 +819,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
+    # Загружаем сохраненные сессии
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -802,10 +833,13 @@ def main():
             except:
                 pass
     
+    # Запускаем веб-сервер
     threading.Thread(target=run_webserver, daemon=True).start()
     
+    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Добавляем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", handle_message))
     app.add_handler(CommandHandler("add_group", handle_message))
@@ -823,6 +857,7 @@ def main():
         print(f"📷 Фото {PHOTO_PATH} будет отправлено с главным меню")
     else:
         print(f"⚠️ Фото {PHOTO_PATH} не найдено")
+    
     app.run_polling()
 
 if __name__ == "__main__":
