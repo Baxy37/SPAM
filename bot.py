@@ -95,7 +95,7 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД =====
+# ===== QR-КОД (УЛУЧШЕННАЯ ЛОГИКА) =====
 async def generate_qr_code(user_id):
     try:
         client = TelegramClient(
@@ -136,6 +136,21 @@ async def check_qr_login(user_id):
         return False, "QR-сессия не найдена"
     
     try:
+        # Проверяем, авторизован ли уже клиент
+        if await qr_data['client'].is_user_authorized():
+            client = qr_data['client']
+            session_string = client.session.save()
+            user['client'] = client
+            user['session'] = session_string
+            user['qr_checked'] = True
+            
+            with open(f'session_string_{user_id}.txt', 'w') as f:
+                f.write(session_string)
+            
+            user['qr_session'] = None
+            return True, "✅ Вход по QR-коду успешен!"
+        
+        # Пробуем получить результат
         result = await qr_data['qr_login'].wait()
         if result is not None:
             client = qr_data['client']
@@ -152,9 +167,10 @@ async def check_qr_login(user_id):
         else:
             return False, "⏳ Ожидание сканирования..."
     except Exception as e:
+        # Если ошибка - проверяем еще раз авторизацию
         try:
-            if await user['qr_session']['client'].is_user_authorized():
-                client = user['qr_session']['client']
+            if await qr_data['client'].is_user_authorized():
+                client = qr_data['client']
                 session_string = client.session.save()
                 user['client'] = client
                 user['session'] = session_string
@@ -172,22 +188,27 @@ async def check_qr_login(user_id):
 async def check_qr_status(query, user_id):
     user = get_user_data(user_id)
     
-    for i in range(10):
-        await asyncio.sleep(3)
+    # Проверяем 15 раз с интервалом 2 секунды (30 секунд)
+    for i in range(15):
+        await asyncio.sleep(2)
         
+        # Сначала проверяем, не авторизован ли уже пользователь
         if user.get('client') and await is_user_ready(user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
+        # Проверяем статус QR
         success, msg = await check_qr_login(user_id)
         if success:
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
+        # Если видим, что сессия сохранена - значит вход выполнен
         if user.get('session'):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
     
+    # Если не удалось - проверяем последний раз через is_user_ready
     if await is_user_ready(user_id):
         await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
         return
@@ -240,6 +261,13 @@ async def verify_code_phone(user_id, code):
     try:
         await client.sign_in(login_data['phone'], code, phone_code_hash=login_data['hash'])
         user['login_state'] = None
+        
+        # Сохраняем сессию
+        session_string = client.session.save()
+        user['session'] = session_string
+        with open(f'session_string_{user_id}.txt', 'w') as f:
+            f.write(session_string)
+        
         return True, "✅ Аккаунт авторизован!"
     except errors.PhoneCodeExpiredError:
         try:
@@ -266,24 +294,6 @@ async def send_message_with_signature(client, chat_id, message):
             return True
         except:
             return False
-
-# ===== ФУНКЦИЯ ОТПРАВКИ НОВОГО СООБЩЕНИЯ =====
-async def send_new_message(target, text, reply_markup=None, parse_mode='Markdown', is_callback=False):
-    """Отправляет новое сообщение вместо редактирования"""
-    if is_callback:
-        await target.message.reply_text(
-            text,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup
-        )
-        # Удаляем старое сообщение
-        await target.message.delete()
-    else:
-        await target.reply_text(
-            text,
-            parse_mode=parse_mode,
-            reply_markup=reply_markup
-        )
 
 # ===== ГЛАВНОЕ МЕНЮ =====
 async def show_main_menu(update, context, is_callback=False):
@@ -757,6 +767,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
+    # Загружаем сохраненные сессии
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
