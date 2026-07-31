@@ -32,16 +32,16 @@ def run_webserver():
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
     server.serve_forever()
 
-# ===== РАБОТА С КЛИЕНТАМИ (С ИСПРАВЛЕНИЕМ ВРЕМЕНИ) =====
+# ===== РАБОТА С КЛИЕНТАМИ =====
 def get_client(user_id):
     if user_id not in user_clients:
-        # ВАЖНО: добавляем time_offset для синхронизации времени с серверами Telegram
-        # Это решает проблему с истекшим кодом при запуске на Render
+        # Создаем клиент с автоматической синхронизацией времени
         client = TelegramClient(
             f'session_{user_id}', 
             API_ID, 
             API_HASH,
-            time_offset=0  # Можно попробовать разные значения, но 0 обычно работает
+            time_offset=0,
+            receive_updates=False
         )
         user_clients[user_id] = client
     return user_clients[user_id]
@@ -63,14 +63,15 @@ async def send_code(user_id, phone):
         # Отправляем запрос кода
         result = await client.send_code_request(phone)
         
-        # Сохраняем состояние
         login_states[user_id] = {
             'step': 'code',
             'phone': phone,
             'hash': result.phone_code_hash,
             'attempts': 0
         }
-        return True, "✅ Код подтверждения отправлен в Telegram!\n\nПроверьте Telegram на вашем телефоне и введите код цифрами."
+        return True, "✅ Код подтверждения отправлен в Telegram!\n\nПроверьте приложение Telegram на телефоне и введите код цифрами."
+    except errors.FloodWaitError as e:
+        return False, f"⏳ Подождите {e.seconds} секунд перед повторной попыткой."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -82,7 +83,6 @@ async def verify_code(user_id, code):
     client = get_client(user_id)
     
     try:
-        # Пытаемся войти с кодом
         await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
         del login_states[user_id]
         return True, "✅ Аккаунт авторизован! Теперь можно делать рассылку."
@@ -256,7 +256,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success, error = await verify_code(user_id, text)
             if success:
                 await update.message.reply_text(error)
-                # Инициализируем хранилище
                 if user_id not in user_groups:
                     user_groups[user_id] = []
                 if user_id not in user_messages:
@@ -372,8 +371,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
+    # Запускаем веб-сервер для Render
     threading.Thread(target=run_webserver, daemon=True).start()
     
+    # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
