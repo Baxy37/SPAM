@@ -95,7 +95,7 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД (УЛУЧШЕННАЯ ЛОГИКА) =====
+# ===== QR-КОД (НОВАЯ ЛОГИКА) =====
 async def generate_qr_code(user_id):
     try:
         client = TelegramClient(
@@ -136,7 +136,7 @@ async def check_qr_login(user_id):
         return False, "QR-сессия не найдена"
     
     try:
-        # Проверяем, авторизован ли уже клиент
+        # ПРОВЕРКА 1: сразу проверяем, авторизован ли клиент
         if await qr_data['client'].is_user_authorized():
             client = qr_data['client']
             session_string = client.session.save()
@@ -150,7 +150,7 @@ async def check_qr_login(user_id):
             user['qr_session'] = None
             return True, "✅ Вход по QR-коду успешен!"
         
-        # Пробуем получить результат
+        # ПРОВЕРКА 2: пробуем получить результат через wait
         result = await qr_data['qr_login'].wait()
         if result is not None:
             client = qr_data['client']
@@ -167,7 +167,7 @@ async def check_qr_login(user_id):
         else:
             return False, "⏳ Ожидание сканирования..."
     except Exception as e:
-        # Если ошибка - проверяем еще раз авторизацию
+        # ПРОВЕРКА 3: при ошибке снова проверяем авторизацию
         try:
             if await qr_data['client'].is_user_authorized():
                 client = qr_data['client']
@@ -188,11 +188,11 @@ async def check_qr_login(user_id):
 async def check_qr_status(query, user_id):
     user = get_user_data(user_id)
     
-    # Проверяем 15 раз с интервалом 2 секунды (30 секунд)
-    for i in range(15):
+    # Проверяем 20 раз с интервалом 2 секунды (40 секунд)
+    for i in range(20):
         await asyncio.sleep(2)
         
-        # Сначала проверяем, не авторизован ли уже пользователь
+        # Проверяем авторизацию
         if user.get('client') and await is_user_ready(user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
@@ -203,12 +203,12 @@ async def check_qr_status(query, user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Если видим, что сессия сохранена - значит вход выполнен
+        # Если сессия сохранена - вход выполнен
         if user.get('session'):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
     
-    # Если не удалось - проверяем последний раз через is_user_ready
+    # Последняя проверка
     if await is_user_ready(user_id):
         await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
         return
@@ -262,7 +262,6 @@ async def verify_code_phone(user_id, code):
         await client.sign_in(login_data['phone'], code, phone_code_hash=login_data['hash'])
         user['login_state'] = None
         
-        # Сохраняем сессию
         session_string = client.session.save()
         user['session'] = session_string
         with open(f'session_string_{user_id}.txt', 'w') as f:
@@ -451,21 +450,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'qr_login':
         success, img_bytes, url = await generate_qr_code(user_id)
         if success:
-            # Отправляем инструкцию
             await query.message.reply_text(
                 "📱 *Сканируй QR-код*\n\n"
                 "Telegram → Настройки → Устройства → Добавить устройство\n\n"
                 "⏳ Действует: 60 секунд",
                 parse_mode='Markdown'
             )
-            # Отправляем QR-код
             await query.message.reply_photo(
                 photo=img_bytes,
                 caption="📸 Отсканируй QR-код для входа"
             )
-            # Удаляем старое сообщение
             await query.message.delete()
-            # Запускаем проверку
             asyncio.create_task(check_qr_status(query, user_id))
         else:
             await query.message.reply_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
@@ -767,7 +762,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
-    # Загружаем сохраненные сессии
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
