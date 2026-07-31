@@ -5,6 +5,7 @@ import time
 import qrcode
 import io
 import logging
+import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
@@ -28,10 +29,7 @@ BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 PHOTO_PATH = 'M.png'
 
-# Получаем URL для вебхука (из переменной окружения Render)
-WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://spam-9xnz.onrender.com')
-WEBHOOK_PATH = '/webhook'  # путь, на который Telegram будет слать обновления
-WEBHOOK_PORT = int(os.environ.get('PORT', 8080))
+PORT = int(os.environ.get('PORT', 8080))
 
 user_data = {}
 active_qr_tasks = {}
@@ -51,8 +49,8 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def run_webserver():
-    server = HTTPServer(('0.0.0.0', WEBHOOK_PORT), HealthHandler)
-    logger.info(f"Веб-сервер для health checks запущен на порту {WEBHOOK_PORT}")
+    server = HTTPServer(('0.0.0.0', PORT), HealthHandler)
+    logger.info(f"Веб-сервер для health checks запущен на порту {PORT}")
     server.serve_forever()
 
 # ===== УТИЛИТЫ =====
@@ -944,7 +942,7 @@ def main():
             except:
                 pass
 
-    # Запускаем веб-сервер для health checks в отдельном потоке
+    # Запускаем веб-сервер для health checks
     threading.Thread(target=run_webserver, daemon=True).start()
 
     # Создаём приложение
@@ -963,19 +961,30 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Устанавливаем вебхук
-    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    logger.info(f"Установка вебхука на {webhook_url}")
-    application.bot.set_webhook(url=webhook_url)
-
-    # Запускаем приложение с вебхуком
-    logger.info("Бот запущен с вебхуком")
-    application.run_webhook(
-        listen='0.0.0.0',
-        port=WEBHOOK_PORT,
-        url_path=WEBHOOK_PATH,
-        webhook_url=webhook_url,
-    )
+    # Запускаем polling с обработкой конфликтов
+    logger.info("Запуск бота в режиме polling...")
+    
+    # Даём время для завершения старого процесса
+    time.sleep(5)
+    
+    max_attempts = 5
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            application.run_polling(
+                drop_pending_updates=True,
+                stop_signals=(signal.SIGINT, signal.SIGTERM)
+            )
+            break
+        except Conflict as e:
+            attempt += 1
+            wait_time = 2 ** attempt  # экспоненциальная задержка
+            logger.warning(f"Конфликт polling (попытка {attempt}/{max_attempts}). Ожидание {wait_time} сек...")
+            time.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Критическая ошибка: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
+    import signal
     main()
