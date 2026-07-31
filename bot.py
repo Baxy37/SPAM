@@ -82,7 +82,7 @@ def get_user_data(user_id):
             'photo_file_id': None,
             'awaiting_group': False,
             'awaiting_msg': False,
-            'qr_retry_count': 0  # для подсчёта перегенераций
+            'qr_retry_count': 0
         }
     return user_data[user_id]
 
@@ -111,11 +111,10 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# === QR-КОД с автоматической перегенерацией ===
+# === QR-КОД (исправленная логика) ===
 async def generate_qr_code(user_id, context=None, chat_id=None):
     """Создаёт новый QR-код и сохраняет сессию"""
     try:
-        # Закрываем старую сессию, если есть
         user = get_user_data(user_id)
         if user.get('qr_session'):
             try:
@@ -169,26 +168,28 @@ async def check_qr_login(user_id, context, chat_id):
         except asyncio.TimeoutError:
             pass
         except errors.SessionPasswordNeededError:
+            # === ЗАПРОС ПАРОЛЯ (работает как в старом коде) ===
             user['login_state'] = {'step': 'password', 'client': client, 'qr_login': qr_login}
             await safe_send_message(context, chat_id,
                                     "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
+            logger.info(f"Запрос пароля для {user_id} отправлен")
             return False, "PASSWORD_NEEDED"
         except errors.ImportLoginTokenError as e:
-            # Токен истёк – нужно перегенерировать QR
+            # Токен истёк – перегенерируем, только если не ждём пароль
+            if user.get('login_state') and user['login_state'].get('step') == 'password':
+                # Уже ждём пароль, не перегенерируем
+                return False, "PASSWORD_NEEDED"
             logger.warning(f"QR-токен истёк для {user_id}, перегенерируем...")
             await safe_send_message(context, chat_id, "⏳ QR-код устарел, генерирую новый...")
             success, img_bytes, url = await generate_qr_code(user_id, context, chat_id)
             if success:
-                # Отправляем новый QR
                 await context.bot.send_photo(chat_id, photo=img_bytes, caption="🔄 Новый QR-код для входа")
                 return False, "QR_TOKEN_EXPIRED_REFRESHED"
             else:
                 return False, f"❌ Ошибка при обновлении QR: {url}"
         except Exception as e:
             logger.error(f"QR check error: {e}")
-            # Если ошибка не связана с истечением, сообщаем
-            if "token has expired" in str(e).lower():
-                # Попробуем перегенерировать
+            if "token has expired" in str(e).lower() and not (user.get('login_state') and user['login_state'].get('step') == 'password'):
                 await safe_send_message(context, chat_id, "⏳ QR-код устарел, генерирую новый...")
                 success, img_bytes, url = await generate_qr_code(user_id, context, chat_id)
                 if success:
@@ -200,7 +201,7 @@ async def check_qr_login(user_id, context, chat_id):
                 await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}")
                 return False, f"Ошибка: {str(e)}"
 
-        # Если авторизация уже выполнена (может быть после ввода пароля через другой поток)
+        # Проверка авторизации (на случай, если уже вошли)
         if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
@@ -229,9 +230,9 @@ async def check_qr_status(query, user_id, context):
         "🔐 Если появится запрос пароля — бот попросит его ввести здесь."
     )
 
-    max_attempts = 10  # максимум перегенераций
-    while user['qr_retry_count'] < max_attempts:
-        for i in range(60):  # ждём до 2 минут (60*2с)
+    max_retries = 10
+    while user['qr_retry_count'] < max_retries:
+        for i in range(60):
             await asyncio.sleep(2)
             success, msg = await check_qr_login(user_id, context, chat_id)
             if success:
@@ -239,27 +240,24 @@ async def check_qr_status(query, user_id, context):
                 await show_main_menu_after_login(query, user_id)
                 return
             if msg == "PASSWORD_NEEDED":
-                # Пароль будет введён позже, выходим из цикла
-                return
+                # Пароль будет введён позже, выходим из цикла, но не завершаем задачу
+                logger.info(f"Ожидание ввода пароля для {user_id}")
+                return  # выходим из check_qr_status, но keep-alive не нужен, т.к. handle_message обработает пароль
             if msg == "QR_TOKEN_EXPIRED_REFRESHED":
                 # QR обновлён, продолжаем ожидание
-                break  # выходим из внутреннего цикла, чтобы перезапустить таймер ожидания
+                user['qr_retry_count'] += 1
+                break  # выходим из внутреннего цикла и начинаем заново
             if "ошибка" in msg.lower():
                 await safe_send_message(context, chat_id, msg)
                 return
             if i % 10 == 0 and i > 0:
                 await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)")
         else:
-            # Если цикл завершился без перегенерации, значит время истекло
+            # Внутренний цикл завершился без перегенерации
             await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.")
             break
-        # Если была перегенерация, увеличиваем счётчик и продолжаем внешний цикл
-        user['qr_retry_count'] += 1
-        if user['qr_retry_count'] >= max_attempts:
-            await safe_send_message(context, chat_id, "⚠️ Слишком много попыток. Нажмите кнопку заново.")
-            break
 
-    # Очистка при завершении
+    # Очистка
     if user.get('qr_session'):
         try:
             await user['qr_session']['client'].disconnect()
@@ -574,7 +572,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Перейди в *Настройки* → *Устройства* → *Добавить устройство*\n"
             "4️⃣ Наведи камеру на QR-код\n"
             "5️⃣ Подтверди вход на телефоне\n"
-            "🔐 *Если появится запрос облачного пароля – введите его прямо сюда, чат с ботом.*\n"
+            "🔐 *Если появится запрос облачного пароля – введите его прямо сюда, в чат с ботом.*\n"
             "⚡ *Быстро и безопасно!*"
         )
         await query.message.reply_text(msg, parse_mode='Markdown')
@@ -622,7 +620,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    # === ИЗМЕНЁННЫЕ КНОПКИ (без @bot) ===
     elif query.data == 'add_group':
         user['awaiting_group'] = True
         user['awaiting_msg'] = False
