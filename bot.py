@@ -6,9 +6,9 @@ from telethon import TelegramClient, errors
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ===== КОНФИГ =====
-API_ID = 2040
-API_HASH = 'b18441a1ff607e10a989891a5462e627'
+# ===== КОНФИГ (ТВОИ ДАННЫЕ!) =====
+API_ID = 36474738
+API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
 
 # ===== ХРАНИЛИЩЕ ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ =====
