@@ -4,6 +4,7 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
+from telethon.network import ConnectionTcpFull
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
@@ -32,33 +33,76 @@ def run_webserver():
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
     server.serve_forever()
 
-# ===== РАБОТА С КЛИЕНТАМИ =====
+# ===== ИСПРАВЛЕННАЯ РАБОТА С КЛИЕНТАМИ =====
 def get_client(user_id):
     if user_id not in user_clients:
-        # Создаем клиент с автоматической синхронизацией времени
+        # Важные изменения для Render:
+        # 1. Используем system_version для обхода проверок
+        # 2. Включаем синхронизацию времени
         client = TelegramClient(
             f'session_{user_id}', 
             API_ID, 
             API_HASH,
-            time_offset=0,
-            receive_updates=False
+            system_version="4.16.30-vxCUSTOM",
+            device_model="PC",
+            app_version="4.16.30",
+            connection_retries=5,
+            retry_delay=1,
+            auto_reconnect=True,
+            sequential_updates=True
         )
         user_clients[user_id] = client
     return user_clients[user_id]
+
+async def sync_time(client):
+    """Синхронизация времени с серверами Telegram"""
+    try:
+        # Принудительная синхронизация времени
+        from telethon.network import MTProtoSender
+        sender = client._sender
+        if sender:
+            await sender._connect()
+            # Синхронизируем время
+            future = sender._send_ackknowledgements()
+            if future:
+                await future
+        return True
+    except Exception as e:
+        print(f"Time sync error: {e}")
+        return False
 
 async def is_user_ready(user_id):
     if user_id not in user_clients:
         return False
     client = user_clients[user_id]
-    if not client.is_connected():
-        await client.connect()
-    return await client.is_user_authorized()
+    try:
+        if not client.is_connected():
+            await client.connect()
+            # Синхронизируем время при подключении
+            await sync_time(client)
+        return await client.is_user_authorized()
+    except Exception as e:
+        print(f"Check ready error: {e}")
+        return False
 
-# ===== ЛОГИН ПО КОДУ (ТОЛЬКО ЧЕРЕЗ TELEGRAM) =====
+# ===== ИСПРАВЛЕННЫЙ ЛОГИН ПО КОДУ =====
 async def send_code(user_id, phone):
     try:
         client = get_client(user_id)
+        
+        # Принудительно закрываем старое соединение
+        if client.is_connected():
+            await client.disconnect()
+            await asyncio.sleep(1)
+        
+        # Подключаемся заново
         await client.connect()
+        
+        # Синхронизируем время
+        await sync_time(client)
+        
+        # Небольшая задержка для стабилизации соединения
+        await asyncio.sleep(1)
         
         # Отправляем запрос кода
         result = await client.send_code_request(phone)
@@ -70,10 +114,30 @@ async def send_code(user_id, phone):
             'attempts': 0
         }
         return True, "✅ Код подтверждения отправлен в Telegram!\n\nПроверьте приложение Telegram на телефоне и введите код цифрами."
+    
     except errors.FloodWaitError as e:
         return False, f"⏳ Подождите {e.seconds} секунд перед повторной попыткой."
+    except errors.RPCError as e:
+        # Пробуем альтернативный метод при ошибке времени
+        try:
+            await client.disconnect()
+            await asyncio.sleep(3)
+            await client.connect()
+            await sync_time(client)
+            await asyncio.sleep(1)
+            result = await client.send_code_request(phone)
+            
+            login_states[user_id] = {
+                'step': 'code',
+                'phone': phone,
+                'hash': result.phone_code_hash,
+                'attempts': 0
+            }
+            return True, "✅ Код подтверждения отправлен в Telegram!\n\nПроверьте приложение Telegram на телефоне и введите код цифрами."
+        except Exception as retry_error:
+            return False, f"❌ Ошибка соединения. Попробуйте позже. ({str(retry_error)[:50]})"
     except Exception as e:
-        return False, f"❌ Ошибка: {str(e)}"
+        return False, f"❌ Ошибка: {str(e)[:100]}"
 
 async def verify_code(user_id, code):
     if user_id not in login_states:
@@ -83,42 +147,63 @@ async def verify_code(user_id, code):
     client = get_client(user_id)
     
     try:
+        # Проверяем соединение
+        if not client.is_connected():
+            await client.connect()
+            await sync_time(client)
+            await asyncio.sleep(1)
+        
+        # Пробуем войти
         await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
         del login_states[user_id]
         return True, "✅ Аккаунт авторизован! Теперь можно делать рассылку."
+    
     except errors.PhoneCodeExpiredError:
-        # Код истек - отправляем новый
+        # Код истек - пробуем отправить новый
         try:
+            if not client.is_connected():
+                await client.connect()
+                await sync_time(client)
+            
             new_result = await client.send_code_request(data['phone'])
             login_states[user_id]['hash'] = new_result.phone_code_hash
             login_states[user_id]['attempts'] += 1
             return False, "⚠️ Код истек. Отправлен новый код в Telegram. Введите его:"
         except Exception as e:
-            return False, f"❌ Ошибка при отправке нового кода: {str(e)}"
+            return False, f"❌ Ошибка при отправке нового кода. Попробуйте /login заново. ({str(e)[:50]})"
+    
     except errors.PhoneCodeInvalidError:
         return False, "❌ Неверный код. Попробуйте еще раз."
+    
     except errors.FloodWaitError as e:
         return False, f"⏳ Подождите {e.seconds} секунд перед повторной попыткой."
+    
     except errors.PhoneNumberInvalidError:
         return False, "❌ Неверный номер телефона"
+    
     except errors.RPCError as e:
-        # Перехватываем любые другие ошибки RPC
-        if 'TIME' in str(e).upper() or 'SYNC' in str(e).upper():
-            # Пробуем переподключиться с синхронизацией времени
-            await client.disconnect()
-            await asyncio.sleep(2)
-            client = get_client(user_id)
-            await client.connect()
+        error_str = str(e)
+        
+        # Если ошибка времени - пробуем переподключиться
+        if 'TIME' in error_str.upper() or 'SYNC' in error_str.upper() or 'TIMEOUT' in error_str.upper():
             try:
+                await client.disconnect()
+                await asyncio.sleep(3)
+                await client.connect()
+                await sync_time(client)
+                await asyncio.sleep(2)
+                
                 # Пробуем еще раз
                 await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
                 del login_states[user_id]
-                return True, "✅ Аккаунт авторизован!"
-            except:
-                return False, "❌ Ошибка синхронизации времени. Попробуйте /login заново."
-        return False, f"❌ Ошибка: {str(e)}"
+                return True, "✅ Аккаунт авторизован после синхронизации времени!"
+            except Exception as retry_error:
+                return False, f"❌ Ошибка синхронизации. Попробуйте /login заново через минуту. ({str(retry_error)[:50]})"
+        
+        return False, f"❌ Ошибка Telegram: {error_str[:100]}"
+    
     except Exception as e:
-        return False, f"❌ Ошибка: {str(e)}"
+        return False, f"❌ Неизвестная ошибка: {str(e)[:100]}\nПопробуйте /login заново."
 
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -197,6 +282,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(f"🚀 Рассылка начата в {len(groups)} групп...")
         
+        # Проверяем соединение перед рассылкой
+        try:
+            if not client.is_connected():
+                await client.connect()
+                await sync_time(client)
+        except Exception as e:
+            await query.edit_message_text(f"❌ Ошибка подключения: {str(e)[:50]}")
+            user_spamming[user_id] = False
+            return
+        
         sent = 0
         for group in groups:
             if not user_spamming.get(user_id, False):
@@ -245,14 +340,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         step = login_states[user_id]['step']
         
         if step == 'phone':
+            # Показываем статус печати
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
             success, error = await send_code(user_id, text)
             if success:
                 await update.message.reply_text(error)
             else:
                 await update.message.reply_text(f"{error}\nПопробуйте /login заново")
-                del login_states[user_id]
+                if user_id in login_states:
+                    del login_states[user_id]
         
         elif step == 'code':
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
             success, error = await verify_code(user_id, text)
             if success:
                 await update.message.reply_text(error)
@@ -262,7 +361,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user_messages[user_id] = ""
                 if user_id not in user_spamming:
                     user_spamming[user_id] = False
-                del login_states[user_id]
+                if user_id in login_states:
+                    del login_states[user_id]
             else:
                 await update.message.reply_text(error)
         
@@ -341,6 +441,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = user_messages[user_id]
         
         await update.message.reply_text(f"🚀 Рассылка начата в {len(groups)} групп...")
+        
+        # Проверяем соединение
+        try:
+            if not client.is_connected():
+                await client.connect()
+                await sync_time(client)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка подключения: {str(e)[:50]}")
+            user_spamming[user_id] = False
+            return
         
         sent = 0
         for group in groups:
