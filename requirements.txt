@@ -1,4 +1,5 @@
 python-telegram-bot==20.7
-telethon==1.34.0
+telethon==1.36.0
 asyncio==3.4.3
 ntplib==0.4.0
+pillow==10.4.0
