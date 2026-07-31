@@ -111,11 +111,12 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# === QR-КОД (исправленная логика) ===
+# === QR-КОД (исправлена генерация с новым клиентом) ===
 async def generate_qr_code(user_id, context=None, chat_id=None):
-    """Создаёт новый QR-код и сохраняет сессию"""
+    """Создаёт новый QR-код с абсолютно новым клиентом"""
     try:
         user = get_user_data(user_id)
+        # Закрываем старую сессию и клиент
         if user.get('qr_session'):
             try:
                 await user['qr_session']['client'].disconnect()
@@ -123,6 +124,7 @@ async def generate_qr_code(user_id, context=None, chat_id=None):
                 pass
             user['qr_session'] = None
 
+        # Создаём новый клиент с пустой строкой сессии
         client = TelegramClient(StringSession(), API_ID, API_HASH,
                                 device_model="Desktop", system_version="Windows 10", app_version="4.16.30")
         await client.connect()
@@ -168,16 +170,13 @@ async def check_qr_login(user_id, context, chat_id):
         except asyncio.TimeoutError:
             pass
         except errors.SessionPasswordNeededError:
-            # === ЗАПРОС ПАРОЛЯ (работает как в старом коде) ===
             user['login_state'] = {'step': 'password', 'client': client, 'qr_login': qr_login}
             await safe_send_message(context, chat_id,
                                     "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
             logger.info(f"Запрос пароля для {user_id} отправлен")
             return False, "PASSWORD_NEEDED"
         except errors.ImportLoginTokenError as e:
-            # Токен истёк – перегенерируем, только если не ждём пароль
             if user.get('login_state') and user['login_state'].get('step') == 'password':
-                # Уже ждём пароль, не перегенерируем
                 return False, "PASSWORD_NEEDED"
             logger.warning(f"QR-токен истёк для {user_id}, перегенерируем...")
             await safe_send_message(context, chat_id, "⏳ QR-код устарел, генерирую новый...")
@@ -201,7 +200,6 @@ async def check_qr_login(user_id, context, chat_id):
                 await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}")
                 return False, f"Ошибка: {str(e)}"
 
-        # Проверка авторизации (на случай, если уже вошли)
         if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
@@ -240,24 +238,20 @@ async def check_qr_status(query, user_id, context):
                 await show_main_menu_after_login(query, user_id)
                 return
             if msg == "PASSWORD_NEEDED":
-                # Пароль будет введён позже, выходим из цикла, но не завершаем задачу
                 logger.info(f"Ожидание ввода пароля для {user_id}")
-                return  # выходим из check_qr_status, но keep-alive не нужен, т.к. handle_message обработает пароль
+                return
             if msg == "QR_TOKEN_EXPIRED_REFRESHED":
-                # QR обновлён, продолжаем ожидание
                 user['qr_retry_count'] += 1
-                break  # выходим из внутреннего цикла и начинаем заново
+                break
             if "ошибка" in msg.lower():
                 await safe_send_message(context, chat_id, msg)
                 return
             if i % 10 == 0 and i > 0:
                 await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)")
         else:
-            # Внутренний цикл завершился без перегенерации
             await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.")
             break
 
-    # Очистка
     if user.get('qr_session'):
         try:
             await user['qr_session']['client'].disconnect()
@@ -288,7 +282,7 @@ async def finish_qr_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === ВХОД ПО НОМЕРУ (без изменений) ===
+# === ВХОД ПО НОМЕРУ ===
 async def send_code_phone(user_id, phone):
     phone = normalize_phone(phone)
     try:
@@ -686,7 +680,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# === ЗАПУСК РАССЫЛКИ (циклический) ===
+# === ЗАПУСК РАССЫЛКИ ===
 async def start_spam(update, context, is_callback=False):
     query = update.callback_query if is_callback else None
     user_id = query.from_user.id if is_callback else update.effective_user.id
@@ -762,7 +756,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user_data(user_id)
     chat_id = update.effective_chat.id
 
-    # Состояния входа
     if user.get('login_state'):
         step = user['login_state']['step']
         if step == 'phone':
@@ -803,7 +796,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update, context)
             return
 
-    # Ожидание ввода группы или сообщения
     if user.get('awaiting_group'):
         user['awaiting_group'] = False
         if not text:
@@ -828,7 +820,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})", parse_mode='Markdown')
         return
 
-    # Обработка фото
     if update.message.photo:
         photo_file_id = update.message.photo[-1].file_id
         user['photo_file_id'] = photo_file_id
@@ -838,12 +829,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               (f"\nТекст: {user['message'][:50]}..." if user.get('message') else ""))
         return
 
-    # Проверка подписки
     if not user['is_subscribed']:
         await update.message.reply_text("⚠️ Подпишитесь на канал. /start")
         return
 
-    # Команды без @bot
     if text and text.startswith('/'):
         parts = text.split(maxsplit=1)
         raw_cmd = parts[0].strip()
