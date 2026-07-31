@@ -246,6 +246,7 @@ async def show_main_menu(update, context, is_callback=False):
     
     photo_path = 'M.png'
     if is_callback:
+        # Для callback-запросов - редактируем существующее сообщение
         if os.path.exists(photo_path):
             with open(photo_path, 'rb') as photo:
                 await update.callback_query.message.reply_photo(
@@ -260,8 +261,10 @@ async def show_main_menu(update, context, is_callback=False):
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
+        # Удаляем старое сообщение
         await update.callback_query.message.delete()
     else:
+        # Для обычных команд
         if os.path.exists(photo_path):
             with open(photo_path, 'rb') as photo:
                 await update.message.reply_photo(
@@ -344,37 +347,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
-    # ===== ПРОВЕРКА ПОДПИСКИ (ПРОСТО ПО НАЖАТИЯМ) =====
+    # ===== ПРОВЕРКА ПОДПИСКИ =====
     if query.data == 'check_subscription':
-        # Увеличиваем счётчик
         user['subscription_attempts'] += 1
         
         # Первое нажатие
         if user['subscription_attempts'] == 1:
             keyboard = [
                 [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
-                [InlineKeyboardButton("✅ Я подписался, проверить", callback_data='check_subscription')],
+                [InlineKeyboardButton("✅ Я подписался!", callback_data='check_subscription')],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
-            # Отвечаем на callback и редактируем сообщение
             await query.answer()
             await query.edit_message_text(
                 "❌ *Вы не подписаны на спонсора!*\n\n"
                 "1. Нажмите *'Подписаться'*\n"
                 "2. Подпишитесь на канал\n"
-                "3. Вернитесь и нажмите *'Я подписался, проверить'*",
+                "3. Нажмите *'Я подписался!'*",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
             return
         
-        # Второе нажатие - пропускаем
+        # Второе нажатие - показываем главное меню
         if user['subscription_attempts'] >= 2:
             user['is_subscribed'] = True
             await query.answer("✅ Доступ получен!")
-            await query.edit_message_text("✅ Спасибо! Переходим в главное меню...")
-            await asyncio.sleep(1)
+            # Сразу показываем главное меню
             await show_main_menu(update, context, is_callback=True)
             return
     
