@@ -21,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# === КОНФИГ (лучше вынести в переменные окружения) ===
+# === КОНФИГ ===
 API_ID = 36474738
 API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
@@ -32,7 +32,6 @@ PHOTO_PATH = 'M.png'
 
 PORT = int(os.environ.get('PORT', 8080))
 
-# === ГЛОБАЛЬНЫЕ ХРАНИЛИЩА ===
 user_data = {}
 active_qr_tasks = {}
 
@@ -105,7 +104,7 @@ async def is_user_ready(user_id):
         if not client.is_connected():
             await client.connect()
         return await client.is_user_authorized()
-    except Exception:
+    except:
         return False
 
 # === QR-КОД ===
@@ -155,7 +154,7 @@ async def check_qr_login(user_id, context, chat_id):
                 return True, "✅ Вход по QR-коду успешен!"
         except asyncio.TimeoutError:
             pass
-        except (errors.PasswordNeededError, errors.SessionPasswordNeededError):
+        except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
             user['login_state'] = {'step': 'password', 'client': client, 'qr_login': qr_login}
             await safe_send_message(context, chat_id,
                                     "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
@@ -237,7 +236,7 @@ async def finish_qr_with_password(user_id, password):
         user['login_state'] = None
         user['qr_session'] = None
         return True, "✅ Аккаунт успешно авторизован с паролем!"
-    except (errors.PasswordNeededError, errors.SessionPasswordNeededError):
+    except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
@@ -279,7 +278,7 @@ async def verify_code_phone(user_id, code, context, chat_id):
         with open(f'session_string_{user_id}.txt', 'w') as f:
             f.write(session_string)
         return True, "✅ Аккаунт авторизован!"
-    except (errors.PasswordNeededError, errors.SessionPasswordNeededError):
+    except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
         user['login_state'] = {'step': 'password_phone', 'client': client, 'phone': phone}
         await safe_send_message(context, chat_id,
                                 "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
@@ -313,7 +312,7 @@ async def finish_phone_with_password(user_id, password):
             f.write(session_string)
         user['login_state'] = None
         return True, "✅ Аккаунт авторизован!"
-    except (errors.PasswordNeededError, errors.SessionPasswordNeededError):
+    except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
@@ -657,7 +656,7 @@ async def start_spam(update, context, is_callback=False):
     groups = user['groups'][:]
     msg = user['message']
     await reply(f"🚀 Начинаю рассылку в {len(groups)} групп...")
-    sent = errors = 0
+    sent = errors_count = 0
     for i, group in enumerate(groups, 1):
         if not user['spamming']:
             await reply(f"🛑 Остановлено. Отправлено: {sent}")
@@ -667,7 +666,7 @@ async def start_spam(update, context, is_callback=False):
             if success:
                 sent += 1
             else:
-                errors += 1
+                errors_count += 1
         except errors.FloodWaitError as e:
             await reply(f"⏳ Ожидание {e.seconds+2} сек...")
             await asyncio.sleep(e.seconds+2)
@@ -675,12 +674,12 @@ async def start_spam(update, context, is_callback=False):
             if success:
                 sent += 1
             else:
-                errors += 1
+                errors_count += 1
         except Exception:
-            errors += 1
+            errors_count += 1
         await asyncio.sleep(2)
     user['spamming'] = False
-    await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
+    await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors_count}")
 
 # === ОБРАБОТЧИК ТЕКСТА ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -722,7 +721,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update, context)
             return
 
-    # Обработка команд, начинающихся с текста
+    # Команды
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -795,7 +794,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ЗАПУСК ===
 def main():
-    # Загрузка сохранённых сессий
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -808,12 +806,10 @@ def main():
             except:
                 pass
 
-    # Веб-сервер для Render
     threading.Thread(target=run_webserver, daemon=True).start()
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("help", handle_message))
@@ -828,7 +824,6 @@ def main():
 
     logger.info("Бот запущен...")
 
-    # Перезапуск при конфликтах
     max_retries = 5
     for attempt in range(max_retries):
         try:
