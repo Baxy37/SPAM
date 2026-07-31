@@ -39,6 +39,15 @@ def run_webserver():
     print(f"✅ Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
+# ===== УТИЛИТЫ =====
+def normalize_phone(phone):
+    """Очищает номер телефона от лишних символов, оставляет цифры и +"""
+    cleaned = ''.join(ch for ch in phone if ch.isdigit() or ch == '+')
+    # Если нет +, добавляем
+    if not cleaned.startswith('+'):
+        cleaned = '+' + cleaned
+    return cleaned
+
 # ===== ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ =====
 def get_user_data(user_id):
     if user_id not in user_data:
@@ -238,8 +247,10 @@ async def finish_qr_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# ===== ВХОД ПО НОМЕРУ (С ЗАЩИТОЙ ОТ ФЛУДА) =====
+# ===== ВХОД ПО НОМЕРУ (С НОРМАЛИЗАЦИЕЙ И ЗАЩИТОЙ ОТ ФЛУДА) =====
 async def send_code_phone(user_id, phone):
+    # Нормализуем номер на всякий случай
+    phone = normalize_phone(phone)
     try:
         client = get_client(user_id)
         await client.connect()
@@ -448,11 +459,10 @@ async def show_subscription_required(update, is_callback=False):
     else:
         await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ===== КОМАНДА /start (СБРАСЫВАЕТ СОСТОЯНИЕ) =====
+# ===== КОМАНДА /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
-    # Сбрасываем все попытки входа
     user['login_state'] = None
     user['qr_session'] = None
     user['subscription_attempts'] = 0
@@ -561,7 +571,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user['login_state'] = {'step': 'phone'}
         await query.message.reply_text(
             "📱 Введите номер телефона:\n"
-            "Пример: `+998901234567`\n\n"
+            "Пример: `+7 967 560 44 96` или `89675604496`\n\n"
+            "Бот автоматически очистит номер от пробелов и скобок.\n"
             "Код придет в Telegram\n\n"
             "⚠️ *Если вход по номеру не работает, используйте QR-код*",
             parse_mode='Markdown'
@@ -755,11 +766,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Для использования бота подпишитесь на канал. Используйте /start")
         return
 
-    # Обработка состояний входа
     if user.get('login_state'):
         step = user['login_state'].get('step')
         if step == 'phone':
-            success, msg = await send_code_phone(user_id, text)
+            # Нормализуем номер перед отправкой
+            normalized = normalize_phone(text)
+            success, msg = await send_code_phone(user_id, normalized)
             if success:
                 await update.message.reply_text(msg + "\nВведите код из Telegram:")
             else:
@@ -779,7 +791,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user['login_state'] = None
             else:
                 await update.message.reply_text(msg)
-                # Если требуется пароль, состояние остаётся, и пользователь может ввести пароль
             return
         elif step == 'password':
             success, msg = await finish_qr_with_password(user_id, text)
