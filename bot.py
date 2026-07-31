@@ -46,7 +46,7 @@ def get_user_data(user_id):
     if user_id not in user_data:
         user_data[user_id] = {
             'is_subscribed': False,
-            'subscription_attempts': 0,  # Счётчик нажатий
+            'subscription_attempts': 0,
             'groups': [],
             'message': '',
             'spamming': False,
@@ -329,7 +329,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
     
-    # Сбрасываем счётчик при новом старте
     user['subscription_attempts'] = 0
     
     if user['is_subscribed']:
@@ -341,12 +340,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== ОБРАБОТЧИК КНОПОК =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
     # ===== ПРОВЕРКА ПОДПИСКИ (СО ВТОРОГО НАЖАТИЯ) =====
     if query.data == 'check_subscription':
+        # Отвечаем на callback, чтобы убрать "загрузка"
+        await query.answer()
+        
         # Увеличиваем счётчик нажатий
         user['subscription_attempts'] += 1
         
@@ -357,6 +358,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("✅ Проверить ещё раз", callback_data='check_subscription')],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await query.edit_message_text(
                 "❌ *Вы не подписаны на спонсора!*\n\n"
                 "1. Нажмите кнопку *'Подписаться'* ниже\n"
@@ -378,11 +380,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== ПРОВЕРКА ПОДПИСКИ ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ =====
     if not user['is_subscribed']:
+        await query.answer()
         await query.edit_message_text("⚠️ Для использования бота подпишитесь на спонсора.")
         await show_subscription_required(update, is_callback=True)
         return
     
     # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
+    await query.answer()
+    
     if query.data == 'qr_help':
         msg = await get_qr_instructions()
         await query.edit_message_text(msg, parse_mode='Markdown')
