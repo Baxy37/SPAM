@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -45,29 +46,50 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН С ПАРОЛЕМ (ПРАВИЛЬНАЯ ИНИЦИАЛИЗАЦИЯ) =====
-async def login_with_password(user_id, phone, password):
+# ===== ЛОГИН ПО КОДУ (С ПОВТОРНОЙ ОТПРАВКОЙ) =====
+async def send_code(user_id, phone):
     try:
         client = get_client(user_id)
         await client.connect()
-        
-        # ОТПРАВЛЯЕМ ЗАПРОС КОДА (ЭТО ОБЯЗАТЕЛЬНО!)
-        try:
-            await client.send_code_request(phone)
-        except Exception as e:
-            print(f"Код не отправился, но похуй: {e}")
-        
-        # ПРОБУЕМ ВОЙТИ ПО ПАРОЛЮ
-        await client.sign_in(password=password)
+        result = await client.send_code_request(phone)
+        login_states[user_id] = {
+            'step': 'code',
+            'phone': phone,
+            'hash': result.phone_code_hash,
+            'attempts': 0
+        }
         return True, None
-    except errors.PasswordHashInvalidError:
-        return False, "❌ Неверный пароль. Проверь раскладку."
-    except errors.SessionPasswordNeededError:
-        return False, "❌ У тебя НЕТ облачного пароля! Включи в настройках Telegram."
+    except Exception as e:
+        return False, str(e)
+
+async def verify_code(user_id, code):
+    if user_id not in login_states:
+        return False, "Сначала используйте /login"
+    
+    data = login_states[user_id]
+    client = get_client(user_id)
+    
+    try:
+        await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
+        del login_states[user_id]
+        return True, None
+    except errors.PhoneCodeExpiredError:
+        # Код истек - отправляем новый
+        try:
+            new_result = await client.send_code_request(data['phone'])
+            login_states[user_id]['hash'] = new_result.phone_code_hash
+            login_states[user_id]['attempts'] += 1
+            return False, "⚠️ Код истек. Отправлен новый код. Введите его:"
+        except Exception as e:
+            return False, f"❌ Ошибка: {str(e)}"
+    except errors.PhoneCodeInvalidError:
+        return False, "❌ Неверный код. Попробуйте еще раз."
+    except errors.FloodWaitError as e:
+        return False, f"⏳ Подождите {e.seconds} секунд перед повторной попыткой."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# ===== КОМАНДЫ БОТА (С КНОПКАМИ) =====
+# ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🔑 Войти", callback_data='login')],
@@ -81,8 +103,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🤖 *ЕБАНУТЫЙ БОТ ДЛЯ РАССЫЛКИ*\n\n"
-        "Жми на кнопки, не еби мозги!",
+        "🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
+        "Все команды доступны по кнопкам ↓",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
@@ -96,31 +118,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'login':
         ready = await is_user_ready(user_id)
         if ready:
-            await query.edit_message_text("✅ Ты уже залогинен, ебанат!")
+            await query.edit_message_text("✅ Вы уже авторизованы!")
             return
         
         login_states[user_id] = {'step': 'phone'}
         await query.edit_message_text(
-            "📱 Введи номер телефона в формате:\n"
+            "📱 Введите номер телефона в формате:\n"
             "+79998887766"
         )
     
     elif query.data == 'add_group':
-        await query.edit_message_text("❌ Введи команду вручную:\n/add_group @chat")
+        await query.edit_message_text(
+            "Введите команду вручную:\n"
+            "`/add_group @username`\n\n"
+            "Например: `/add_group @durov`",
+            parse_mode='Markdown'
+        )
     
     elif query.data == 'set_msg':
-        await query.edit_message_text("❌ Введи команду вручную:\n/set_msg Текст сообщения")
+        await query.edit_message_text(
+            "Введите команду вручную:\n"
+            "`/set_msg Текст сообщения`\n\n"
+            "Например: `/set_msg Всем привет!`",
+            parse_mode='Markdown'
+        )
     
     elif query.data == 'start_spam':
         ready = await is_user_ready(user_id)
         if not ready:
-            await query.edit_message_text("❌ Сначала залогинься! /login")
+            await query.edit_message_text("❌ Сначала войдите: /login")
             return
         if user_id not in user_messages or not user_messages[user_id]:
-            await query.edit_message_text("❌ Сначала установи сообщение! /set_msg")
+            await query.edit_message_text("❌ Сначала установите сообщение: /set_msg")
             return
         if user_id not in user_groups or not user_groups[user_id]:
-            await query.edit_message_text("❌ Сначала добавь группы! /add_group")
+            await query.edit_message_text("❌ Сначала добавьте группы: /add_group")
             return
         if user_spamming.get(user_id, False):
             await query.edit_message_text("⚠️ Рассылка уже идет!")
@@ -142,17 +174,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await client.send_message(group, msg)
                 sent += 1
                 await query.edit_message_text(f"✅ Отправлено в {group}")
-                await asyncio.sleep(8)
+                await asyncio.sleep(5)
             except Exception as e:
                 await query.edit_message_text(f"❌ Ошибка в {group}: {str(e)[:50]}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(10)
         
         user_spamming[user_id] = False
         await query.edit_message_text(f"✅ Готово! Отправлено в {sent} групп")
     
     elif query.data == 'stop_spam':
         user_spamming[user_id] = False
-        await query.edit_message_text("🛑 Остановка рассылки...")
+        await query.edit_message_text("🛑 Остановка...")
     
     elif query.data == 'status':
         ready = await is_user_ready(user_id)
@@ -177,40 +209,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    # Если пользователь в процессе входа
     if user_id in login_states:
         step = login_states[user_id]['step']
         
         if step == 'phone':
-            login_states[user_id]['phone'] = text
-            login_states[user_id]['step'] = 'password'
-            await update.message.reply_text(
-                "🔐 *Введи свой облачный пароль (2FA)*\n\n"
-                "Код не нужен! Только пароль.",
-                parse_mode='Markdown'
-            )
-        
-        elif step == 'password':
-            phone = login_states[user_id]['phone']
-            password = text
-            
-            success, error = await login_with_password(user_id, phone, password)
-            
+            success, error = await send_code(user_id, text)
             if success:
-                await update.message.reply_text("✅ **Аккаунт залогинен!**")
+                await update.message.reply_text(
+                    "✅ Код отправлен в Telegram!\n"
+                    "Введите код цифрами:"
+                )
+            else:
+                await update.message.reply_text(f"❌ Ошибка: {error}\nПопробуйте /login заново")
                 del login_states[user_id]
+        
+        elif step == 'code':
+            success, error = await verify_code(user_id, text)
+            if success:
+                await update.message.reply_text("✅ Аккаунт авторизован! Можно работать.")
                 if user_id not in user_groups:
                     user_groups[user_id] = []
                 if user_id not in user_messages:
                     user_messages[user_id] = ""
                 if user_id not in user_spamming:
                     user_spamming[user_id] = False
+                del login_states[user_id]
             else:
-                await update.message.reply_text(f"{error}\nПопробуй еще раз.")
+                await update.message.reply_text(error)
         
         return
     
-    # Обычные команды
     if text.startswith('/add_group'):
         args = text.split()
         if len(args) < 2:
@@ -222,6 +250,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if group not in user_groups[user_id]:
             user_groups[user_id].append(group)
             await update.message.reply_text(f"✅ Добавлено: {group}")
+        else:
+            await update.message.reply_text(f"⚠️ Группа уже есть: {group}")
     
     elif text.startswith('/set_msg'):
         args = text.split()
@@ -234,11 +264,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '/login':
         ready = await is_user_ready(user_id)
         if ready:
-            await update.message.reply_text("✅ Ты уже залогинен!")
+            await update.message.reply_text("✅ Вы уже авторизованы!")
             return
         login_states[user_id] = {'step': 'phone'}
         await update.message.reply_text(
-            "📱 Введи номер телефона:\n"
+            "📱 Введите номер телефона:\n"
             "+79998887766"
         )
     
@@ -263,13 +293,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '/start_spam':
         ready = await is_user_ready(user_id)
         if not ready:
-            await update.message.reply_text("❌ Сначала залогинься! /login")
+            await update.message.reply_text("❌ Сначала войдите: /login")
             return
         if user_id not in user_messages or not user_messages[user_id]:
-            await update.message.reply_text("❌ Сначала установи сообщение! /set_msg")
+            await update.message.reply_text("❌ Сначала установите сообщение: /set_msg")
             return
         if user_id not in user_groups or not user_groups[user_id]:
-            await update.message.reply_text("❌ Сначала добавь группы! /add_group")
+            await update.message.reply_text("❌ Сначала добавьте группы: /add_group")
             return
         if user_spamming.get(user_id, False):
             await update.message.reply_text("⚠️ Рассылка уже идет!")
@@ -291,10 +321,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await client.send_message(group, msg)
                 sent += 1
                 await update.message.reply_text(f"✅ Отправлено в {group}")
-                await asyncio.sleep(8)
+                await asyncio.sleep(5)
             except Exception as e:
                 await update.message.reply_text(f"❌ Ошибка в {group}: {str(e)[:50]}")
-                await asyncio.sleep(15)
+                await asyncio.sleep(10)
         
         user_spamming[user_id] = False
         await update.message.reply_text(f"✅ Готово! Отправлено в {sent} групп")
@@ -303,8 +333,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_spamming[user_id] = False
         await update.message.reply_text("🛑 Остановка...")
     
+    elif text == '/start':
+        await start(update, context)
+    
     else:
-        await update.message.reply_text("ℹ️ Используй /start для меню")
+        await update.message.reply_text("ℹ️ Используйте /start для меню")
 
 # ===== ЗАПУСК =====
 def main():
@@ -315,7 +348,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен! Жми кнопки, не еби мозги!")
+    print("✅ Бот запущен! Используйте /start")
     app.run_polling()
 
 if __name__ == "__main__":
