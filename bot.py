@@ -8,19 +8,19 @@ from telethon import TelegramClient, errors
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ===== КОНФИГ =====
+# ===== КОНФИГ (ТВОИ ДАННЫЕ) =====
 API_ID = 36474738
 API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
 
-# Хранилище
+# Хранилище пользователей
 user_clients = {}
 user_groups = {}
 user_messages = {}
 user_spamming = {}
 login_states = {}
 
-# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ =====
+# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ (просто лог, не меняет систему) =====
 def sync_time():
     try:
         client = ntplib.NTPClient()
@@ -34,7 +34,7 @@ def sync_time():
         print(f"⚠️ Ошибка синхронизации: {e}")
         return None
 
-# ===== ВЕБ-СЕРВЕР =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -61,78 +61,27 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН ПО КОДУ =====
-async def start_login(user_id, phone):
-    try:
-        client = get_client(user_id)
-        await client.connect()
-        result = await client.send_code_request(phone)
-        login_states[user_id] = {
-            'step': 'code',
-            'phone': phone,
-            'hash': result.phone_code_hash
-        }
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-async def complete_login(user_id, code):
-    if user_id not in login_states:
-        return False, "Сначала используйте /login"
-    
-    data = login_states[user_id]
-    client = get_client(user_id)
-    
-    try:
-        await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
-        del login_states[user_id]
-        return True, None
-    except errors.PhoneCodeExpiredError:
-        sync_time()
-        try:
-            new_result = await client.send_code_request(data['phone'])
-            login_states[user_id]['hash'] = new_result.phone_code_hash
-            return False, "⏰ Код истек. Отправлен новый код. Введите его:"
-        except Exception as e:
-            return False, f"Ошибка: {str(e)}"
-    except errors.PhoneCodeInvalidError:
-        return False, "❌ Неверный код. Попробуйте еще раз."
-    except Exception as e:
-        return False, str(e)
-
-# ===== QR-ВХОД (универсальный для всех версий) =====
+# ===== QR-ВХОД (НОВАЯ ВЕРСИЯ ДЛЯ TELEGRAM) =====
 async def qr_login(user_id):
     client = get_client(user_id)
     await client.connect()
-    
-    # Получаем QR-объект
     qr = await client.qr_login()
-    
-    # Получаем QR-код (для старых версий Telethon)
-    try:
-        # Новый способ
-        img = await qr.qr_code()
-    except AttributeError:
-        # Старый способ — сохраняем через bytes
-        qr_bytes = qr.qr_code_bytes
-        from io import BytesIO
-        from PIL import Image
-        img = Image.open(BytesIO(qr_bytes))
-    
+    img = await qr.qr_code()  # для Telethon 1.36+
     return qr, img
 
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Бот для рассылки\n\n"
-        "🔑 /login — войти по номеру и коду\n"
-        "📱 /qr — войти по QR-коду\n"
-        "➕ /add_group @chat — добавить группу\n"
-        "📝 /set_msg Текст — установить сообщение\n"
-        "🚀 /start_spam — запустить рассылку\n"
-        "🛑 /stop_spam — остановить\n"
-        "📊 /status — проверить статус\n"
-        "📋 /groups — список групп"
+        "🤖 **Бот для рассылки**\n\n"
+        "🔑 `/login` — войти по номеру и коду (может не работать)\n"
+        "📱 `/qr` — войти по QR-коду **(РЕКОМЕНДУЮ)**\n"
+        "➕ `/add_group @chat` — добавить группу\n"
+        "📝 `/set_msg Текст` — установить сообщение\n"
+        "🚀 `/start_spam` — запустить рассылку\n"
+        "🛑 `/stop_spam` — остановить\n"
+        "📊 `/status` — проверить статус\n"
+        "📋 `/groups` — список групп",
+        parse_mode='Markdown'
     )
 
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,16 +109,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = login_states[user_id]['step']
     
     if step == 'phone':
-        success, error = await start_login(user_id, text)
-        if success:
+        try:
+            client = get_client(user_id)
+            await client.connect()
+            result = await client.send_code_request(text)
+            login_states[user_id] = {
+                'step': 'code',
+                'phone': text,
+                'hash': result.phone_code_hash
+            }
             await update.message.reply_text("✅ Код отправлен в Telegram!\nВведите код цифрами:")
-        else:
-            await update.message.reply_text(f"❌ Ошибка: {error}\nПопробуйте /login заново")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}\nПопробуйте /login заново")
             del login_states[user_id]
     
     elif step == 'code':
-        success, error = await complete_login(user_id, text)
-        if success:
+        data = login_states[user_id]
+        client = get_client(user_id)
+        try:
+            await client.sign_in(data['phone'], text, phone_code_hash=data['hash'])
+            del login_states[user_id]
             await update.message.reply_text("✅ Аккаунт авторизован! Можно работать.")
             if user_id not in user_groups:
                 user_groups[user_id] = []
@@ -177,12 +136,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_messages[user_id] = ""
             if user_id not in user_spamming:
                 user_spamming[user_id] = False
-        else:
-            if "Код истек" in error:
-                await update.message.reply_text(f"⚠️ {error}")
-            else:
-                await update.message.reply_text(f"❌ {error}\nПопробуйте /login заново")
-                del login_states[user_id]
+        except errors.PhoneCodeExpiredError:
+            await update.message.reply_text("⏰ Код истек. Попробуйте /login заново или используйте /qr")
+            del login_states[user_id]
+        except errors.PhoneCodeInvalidError:
+            await update.message.reply_text("❌ Неверный код. Попробуйте еще раз.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}\nПопробуйте /login заново")
+            del login_states[user_id]
 
 async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -196,8 +157,6 @@ async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         qr_login_obj, img = await qr_login(user_id)
-        
-        # Сохраняем и отправляем
         img_path = f'qr_{user_id}.png'
         img.save(img_path)
         
@@ -217,7 +176,6 @@ async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         os.remove(img_path)
         
-        # Ждем сканирования
         try:
             await qr_login_obj.wait(60)
             await update.message.reply_text("✅ Аккаунт успешно авторизован! 🎉")
@@ -273,7 +231,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ready = await is_user_ready(user_id)
     
     if not ready:
-        await update.message.reply_text("❌ Сначала авторизуйтесь: /login или /qr")
+        await update.message.reply_text("❌ Сначала авторизуйтесь: /qr")
         return
     if user_id not in user_messages or not user_messages[user_id]:
         await update.message.reply_text("❌ Сначала установите сообщение: /set_msg")
@@ -351,7 +309,7 @@ def main():
     app.add_handler(CommandHandler("groups", groups_list))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен! Используйте /login или /qr.")
+    print("✅ Бот запущен! Используйте /qr для входа.")
     app.run_polling()
 
 if __name__ == "__main__":
