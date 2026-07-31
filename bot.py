@@ -95,10 +95,10 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД =====
+# ===== QR-КОД (ПОЛНОСТЬЮ РАБОЧАЯ ЛОГИКА) =====
 async def generate_qr_code(user_id):
     try:
-        # Создаем НОВЫЙ клиент для QR-входа
+        # Создаем новый клиент для QR-входа
         client = TelegramClient(
             StringSession(),
             API_ID, API_HASH,
@@ -135,12 +135,14 @@ async def generate_qr_code(user_id):
         return False, None, str(e)
 
 async def check_qr_login(user_id):
+    """Проверяет статус QR-входа"""
     user = get_user_data(user_id)
     qr_data = user.get('qr_session')
     if not qr_data:
         return False, "QR-сессия не найдена"
     
     try:
+        # Пробуем получить результат
         result = await qr_data['qr_login'].wait()
         if result is not None:
             client = qr_data['client']
@@ -157,6 +159,7 @@ async def check_qr_login(user_id):
         else:
             return False, "⏳ Ожидание сканирования..."
     except Exception as e:
+        # Если ошибка - проверяем, может вход уже выполнен
         try:
             if await user['qr_session']['client'].is_user_authorized():
                 client = user['qr_session']['client']
@@ -175,24 +178,29 @@ async def check_qr_login(user_id):
         return False, f"❌ Ошибка: {str(e)}"
 
 async def check_qr_status(query, user_id):
+    """Проверяет статус QR-входа каждые 3 секунды"""
     user = get_user_data(user_id)
     
     for i in range(10):
         await asyncio.sleep(3)
         
+        # Проверяем, не авторизован ли уже пользователь
         if user.get('client') and await is_user_ready(user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
+        # Проверяем статус QR
         success, msg = await check_qr_login(user_id)
         if success:
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
+        # Если видим, что сессия сохранена - значит вход выполнен
         if user.get('session'):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
     
+    # Если не удалось - проверяем последний раз через is_user_ready
     if await is_user_ready(user_id):
         await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
         return
@@ -272,7 +280,7 @@ async def send_message_with_signature(client, chat_id, message):
         except:
             return False
 
-# ===== ГЛАВНОЕ МЕНЮ (С ФОТО) =====
+# ===== ГЛАВНОЕ МЕНЮ =====
 async def show_main_menu(update, context, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📱 Вход по QR", callback_data='qr_login')],
@@ -331,7 +339,7 @@ async def show_main_menu(update, context, is_callback=False):
                 reply_markup=reply_markup
             )
 
-# ===== ПЕРВОЕ СООБЩЕНИЕ (БЕЗ ФОТО) =====
+# ===== ПЕРВОЕ СООБЩЕНИЕ =====
 async def show_subscription_required(update, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=SPONSOR_LINK)],
@@ -714,6 +722,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
+    # Загружаем сохраненные сессии
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
