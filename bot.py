@@ -79,9 +79,9 @@ def get_user_data(user_id):
             'login_state': None,
             'qr_session': None,
             'qr_checked': False,
-            'photo_file_id': None,      # для рассылки с фото
-            'awaiting_group': False,    # ожидание ввода группы
-            'awaiting_msg': False       # ожидание ввода сообщения
+            'photo_file_id': None,      # новое для фото
+            'awaiting_group': False,    # новое для ввода группы
+            'awaiting_msg': False       # новое для ввода сообщения
         }
     return user_data[user_id]
 
@@ -126,7 +126,7 @@ async def reply_with_back(update, text, reply_markup=None, parse_mode='Markdown'
         reply_markup = add_back_button()
     await update.effective_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-# === QR-КОД ===
+# === QR-КОД (с запросом пароля 2FA в чате) ===
 async def generate_qr_code(user_id):
     try:
         client = TelegramClient(StringSession(), API_ID, API_HASH,
@@ -216,7 +216,7 @@ async def check_qr_status(query, user_id, context):
             await show_main_menu_after_login(query, user_id)
             return
         if msg == "PASSWORD_NEEDED":
-            return
+            return  # выходим из цикла, ждём ввода пароля в handle_message
         if "ошибка" in msg.lower():
             await safe_send_message(context, chat_id, msg, reply_markup=add_back_button())
             return
@@ -253,7 +253,7 @@ async def finish_qr_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === ВХОД ПО НОМЕРУ ===
+# === ВХОД ПО НОМЕРУ (с запросом пароля 2FA в чате) ===
 async def send_code_phone(user_id, phone):
     phone = normalize_phone(phone)
     try:
@@ -737,7 +737,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user_data(user_id)
     chat_id = update.effective_chat.id
 
-    # === Обработка состояний входа (без изменений) ===
+    # === Обработка состояний входа (полностью как в оригинале) ===
     if user.get('login_state'):
         step = user['login_state']['step']
         if step == 'phone':
