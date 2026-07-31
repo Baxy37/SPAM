@@ -107,7 +107,7 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# === QR-КОД ===
+# === QR-КОД (с запросом пароля 2FA в чате) ===
 async def generate_qr_code(user_id):
     try:
         client = TelegramClient(StringSession(), API_ID, API_HASH,
@@ -142,6 +142,7 @@ async def check_qr_login(user_id, context, chat_id):
         client = qr_data['client']
         qr_login = qr_data['qr_login']
         try:
+            # Ждём, пока пользователь отсканирует QR и введёт пароль (если требуется)
             result = await qr_login.wait(timeout=1)
             if result is not None:
                 session_string = client.session.save()
@@ -154,7 +155,8 @@ async def check_qr_login(user_id, context, chat_id):
                 return True, "✅ Вход по QR-коду успешен!"
         except asyncio.TimeoutError:
             pass
-        except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
+        except errors.SessionPasswordNeededError:
+            # Требуется облачный пароль — запрашиваем его у пользователя
             user['login_state'] = {'step': 'password', 'client': client, 'qr_login': qr_login}
             await safe_send_message(context, chat_id,
                                     "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
@@ -164,6 +166,7 @@ async def check_qr_login(user_id, context, chat_id):
             await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}")
             return False, f"Ошибка: {str(e)}"
 
+        # Дополнительная проверка (на случай, если wait() не вернул результат, но авторизация прошла)
         if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
@@ -173,21 +176,8 @@ async def check_qr_login(user_id, context, chat_id):
                 f.write(session_string)
             user['qr_session'] = None
             return True, "✅ Вход по QR-коду успешен!"
-        return False, "⏳ Ожидание сканирования..."
+        return False, "⏳ Ожидание..."
     except Exception as e:
-        try:
-            if await qr_data['client'].is_user_authorized():
-                client = qr_data['client']
-                session_string = client.session.save()
-                user['client'] = client
-                user['session'] = session_string
-                user['qr_checked'] = True
-                with open(f'session_string_{user_id}.txt', 'w') as f:
-                    f.write(session_string)
-                user['qr_session'] = None
-                return True, "✅ Вход по QR-коду успешен!"
-        except:
-            pass
         return False, f"❌ Ошибка: {str(e)}"
 
 async def check_qr_status(query, user_id, context):
@@ -195,8 +185,13 @@ async def check_qr_status(query, user_id, context):
         active_qr_tasks[user_id].cancel()
     active_qr_tasks[user_id] = asyncio.current_task()
     chat_id = query.message.chat_id
-    await safe_send_message(context, chat_id, "⏳ Ожидание сканирования QR-кода...")
-    for i in range(30):
+    await safe_send_message(context, chat_id,
+        "⏳ Ожидание входа...\n\n"
+        "📱 Отсканируйте QR-код в приложении Telegram (Настройки → Устройства → Добавить устройство).\n"
+        "🔐 Если появится запрос пароля — бот попросит его ввести здесь."
+    )
+    # Ждём до 2 минут (60 итераций * 2 сек), пока пользователь сканирует и вводит пароль
+    for i in range(60):
         await asyncio.sleep(2)
         success, msg = await check_qr_login(user_id, context, chat_id)
         if success:
@@ -204,13 +199,14 @@ async def check_qr_status(query, user_id, context):
             await show_main_menu_after_login(query, user_id)
             return
         if msg == "PASSWORD_NEEDED":
+            # Пароль будет введён позже, цикл завершается
             return
         if "ошибка" in msg.lower():
             await safe_send_message(context, chat_id, msg)
             return
-        if i % 5 == 0 and i > 0:
-            await safe_send_message(context, chat_id, f"⏳ Ожидание сканирования... ({i*2} сек)")
-    await safe_send_message(context, chat_id, "⏰ QR-код истек. Попробуйте снова.")
+        if i % 10 == 0 and i > 0:
+            await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)")
+    await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.")
     user = get_user_data(user_id)
     if user.get('qr_session'):
         try:
@@ -220,6 +216,7 @@ async def check_qr_status(query, user_id, context):
         user['qr_session'] = None
 
 async def finish_qr_with_password(user_id, password):
+    """Завершение QR-входа с облачным паролем"""
     user = get_user_data(user_id)
     login_state = user.get('login_state')
     if not login_state or login_state.get('step') != 'password':
@@ -236,12 +233,12 @@ async def finish_qr_with_password(user_id, password):
         user['login_state'] = None
         user['qr_session'] = None
         return True, "✅ Аккаунт успешно авторизован с паролем!"
-    except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
+    except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === ВХОД ПО НОМЕРУ ===
+# === ВХОД ПО НОМЕРУ (с запросом пароля 2FA в чате) ===
 async def send_code_phone(user_id, phone):
     phone = normalize_phone(phone)
     try:
@@ -278,7 +275,7 @@ async def verify_code_phone(user_id, code, context, chat_id):
         with open(f'session_string_{user_id}.txt', 'w') as f:
             f.write(session_string)
         return True, "✅ Аккаунт авторизован!"
-    except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
+    except errors.SessionPasswordNeededError:
         user['login_state'] = {'step': 'password_phone', 'client': client, 'phone': phone}
         await safe_send_message(context, chat_id,
                                 "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
@@ -298,6 +295,7 @@ async def verify_code_phone(user_id, code, context, chat_id):
         return False, f"❌ Ошибка: {str(e)}"
 
 async def finish_phone_with_password(user_id, password):
+    """Завершение входа по номеру с облачным паролем"""
     user = get_user_data(user_id)
     login_state = user.get('login_state')
     if not login_state or login_state.get('step') != 'password_phone':
@@ -312,7 +310,7 @@ async def finish_phone_with_password(user_id, password):
             f.write(session_string)
         user['login_state'] = None
         return True, "✅ Аккаунт авторизован!"
-    except errors.SessionPasswordNeededError:  # <-- ИСПРАВЛЕНО
+    except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
@@ -519,6 +517,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Перейди в *Настройки* → *Устройства* → *Добавить устройство*\n"
             "4️⃣ Наведи камеру на QR-код\n"
             "5️⃣ Подтверди вход на телефоне\n"
+            "🔐 *Если появится запрос облачного пароля – введите его прямо сюда, в чат с ботом.*\n"
             "⚡ *Быстро и безопасно!*"
         )
         await query.message.reply_text(msg, parse_mode='Markdown')
@@ -533,7 +532,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(
                 "📱 *Сканируй QR-код*\n\n"
                 "Telegram → Настройки → Устройства → Добавить устройство\n\n"
-                "⏳ Действует: 60 секунд",
+                "🔐 Если потребуется пароль – бот попросит его здесь.\n"
+                "⏳ Ожидание до 2 минут",
                 parse_mode='Markdown'
             )
             await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
@@ -708,13 +708,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif msg != "PASSWORD_NEEDED":
                 await update.message.reply_text(msg)
             return
-        elif step == 'password':
+        elif step == 'password':          # пароль от QR
             success, msg = await finish_qr_with_password(user_id, text)
             await update.message.reply_text(msg)
             if success:
                 await show_main_menu(update, context)
             return
-        elif step == 'password_phone':
+        elif step == 'password_phone':    # пароль от номера
             success, msg = await finish_phone_with_password(user_id, text)
             await update.message.reply_text(msg)
             if success:
