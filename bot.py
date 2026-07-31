@@ -35,7 +35,7 @@ PORT = int(os.environ.get('PORT', 8080))
 user_data = {}
 active_qr_tasks = {}
 
-# === ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECK ===
+# === ВЕБ-СЕРВЕР ===
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/health', '/'):
@@ -79,9 +79,10 @@ def get_user_data(user_id):
             'login_state': None,
             'qr_session': None,
             'qr_checked': False,
-            'photo_file_id': None,      # новое для фото
-            'awaiting_group': False,    # новое для ввода группы
-            'awaiting_msg': False       # новое для ввода сообщения
+            'photo_file_id': None,
+            'awaiting_group': False,
+            'awaiting_msg': False,
+            'qr_retry_count': 0  # для подсчёта перегенераций
         }
     return user_data[user_id]
 
@@ -110,14 +111,23 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# === QR-КОД (с запросом пароля 2FA в чате) ===
-async def generate_qr_code(user_id):
+# === QR-КОД с автоматической перегенерацией ===
+async def generate_qr_code(user_id, context=None, chat_id=None):
+    """Создаёт новый QR-код и сохраняет сессию"""
     try:
+        # Закрываем старую сессию, если есть
+        user = get_user_data(user_id)
+        if user.get('qr_session'):
+            try:
+                await user['qr_session']['client'].disconnect()
+            except:
+                pass
+            user['qr_session'] = None
+
         client = TelegramClient(StringSession(), API_ID, API_HASH,
                                 device_model="Desktop", system_version="Windows 10", app_version="4.16.30")
         await client.connect()
         qr_login = await client.qr_login()
-        user = get_user_data(user_id)
         user['qr_session'] = {
             'client': client,
             'qr_login': qr_login,
@@ -154,6 +164,7 @@ async def check_qr_login(user_id, context, chat_id):
                 with open(f'session_string_{user_id}.txt', 'w') as f:
                     f.write(session_string)
                 user['qr_session'] = None
+                user['qr_retry_count'] = 0
                 return True, "✅ Вход по QR-коду успешен!"
         except asyncio.TimeoutError:
             pass
@@ -162,11 +173,34 @@ async def check_qr_login(user_id, context, chat_id):
             await safe_send_message(context, chat_id,
                                     "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
             return False, "PASSWORD_NEEDED"
+        except errors.ImportLoginTokenError as e:
+            # Токен истёк – нужно перегенерировать QR
+            logger.warning(f"QR-токен истёк для {user_id}, перегенерируем...")
+            await safe_send_message(context, chat_id, "⏳ QR-код устарел, генерирую новый...")
+            success, img_bytes, url = await generate_qr_code(user_id, context, chat_id)
+            if success:
+                # Отправляем новый QR
+                await context.bot.send_photo(chat_id, photo=img_bytes, caption="🔄 Новый QR-код для входа")
+                return False, "QR_TOKEN_EXPIRED_REFRESHED"
+            else:
+                return False, f"❌ Ошибка при обновлении QR: {url}"
         except Exception as e:
             logger.error(f"QR check error: {e}")
-            await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}")
-            return False, f"Ошибка: {str(e)}"
+            # Если ошибка не связана с истечением, сообщаем
+            if "token has expired" in str(e).lower():
+                # Попробуем перегенерировать
+                await safe_send_message(context, chat_id, "⏳ QR-код устарел, генерирую новый...")
+                success, img_bytes, url = await generate_qr_code(user_id, context, chat_id)
+                if success:
+                    await context.bot.send_photo(chat_id, photo=img_bytes, caption="🔄 Новый QR-код для входа")
+                    return False, "QR_TOKEN_EXPIRED_REFRESHED"
+                else:
+                    return False, f"❌ Ошибка: {str(e)}"
+            else:
+                await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}")
+                return False, f"Ошибка: {str(e)}"
 
+        # Если авторизация уже выполнена (может быть после ввода пароля через другой поток)
         if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
@@ -175,6 +209,7 @@ async def check_qr_login(user_id, context, chat_id):
             with open(f'session_string_{user_id}.txt', 'w') as f:
                 f.write(session_string)
             user['qr_session'] = None
+            user['qr_retry_count'] = 0
             return True, "✅ Вход по QR-коду успешен!"
         return False, "⏳ Ожидание..."
     except Exception as e:
@@ -185,27 +220,46 @@ async def check_qr_status(query, user_id, context):
         active_qr_tasks[user_id].cancel()
     active_qr_tasks[user_id] = asyncio.current_task()
     chat_id = query.message.chat_id
+    user = get_user_data(user_id)
+    user['qr_retry_count'] = 0
+
     await safe_send_message(context, chat_id,
         "⏳ Ожидание входа...\n\n"
         "📱 Отсканируйте QR-код в приложении Telegram (Настройки → Устройства → Добавить устройство).\n"
         "🔐 Если появится запрос пароля — бот попросит его ввести здесь."
     )
-    for i in range(60):
-        await asyncio.sleep(2)
-        success, msg = await check_qr_login(user_id, context, chat_id)
-        if success:
-            await safe_send_message(context, chat_id, "✅ QR-вход успешен! Аккаунт авторизован.")
-            await show_main_menu_after_login(query, user_id)
-            return
-        if msg == "PASSWORD_NEEDED":
-            return
-        if "ошибка" in msg.lower():
-            await safe_send_message(context, chat_id, msg)
-            return
-        if i % 10 == 0 and i > 0:
-            await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)")
-    await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.")
-    user = get_user_data(user_id)
+
+    max_attempts = 10  # максимум перегенераций
+    while user['qr_retry_count'] < max_attempts:
+        for i in range(60):  # ждём до 2 минут (60*2с)
+            await asyncio.sleep(2)
+            success, msg = await check_qr_login(user_id, context, chat_id)
+            if success:
+                await safe_send_message(context, chat_id, "✅ QR-вход успешен! Аккаунт авторизован.")
+                await show_main_menu_after_login(query, user_id)
+                return
+            if msg == "PASSWORD_NEEDED":
+                # Пароль будет введён позже, выходим из цикла
+                return
+            if msg == "QR_TOKEN_EXPIRED_REFRESHED":
+                # QR обновлён, продолжаем ожидание
+                break  # выходим из внутреннего цикла, чтобы перезапустить таймер ожидания
+            if "ошибка" in msg.lower():
+                await safe_send_message(context, chat_id, msg)
+                return
+            if i % 10 == 0 and i > 0:
+                await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)")
+        else:
+            # Если цикл завершился без перегенерации, значит время истекло
+            await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.")
+            break
+        # Если была перегенерация, увеличиваем счётчик и продолжаем внешний цикл
+        user['qr_retry_count'] += 1
+        if user['qr_retry_count'] >= max_attempts:
+            await safe_send_message(context, chat_id, "⚠️ Слишком много попыток. Нажмите кнопку заново.")
+            break
+
+    # Очистка при завершении
     if user.get('qr_session'):
         try:
             await user['qr_session']['client'].disconnect()
@@ -229,13 +283,14 @@ async def finish_qr_with_password(user_id, password):
             f.write(session_string)
         user['login_state'] = None
         user['qr_session'] = None
+        user['qr_retry_count'] = 0
         return True, "✅ Аккаунт успешно авторизован с паролем!"
     except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === ВХОД ПО НОМЕРУ (с запросом пароля 2FA в чате) ===
+# === ВХОД ПО НОМЕРУ (без изменений) ===
 async def send_code_phone(user_id, phone):
     phone = normalize_phone(phone)
     try:
@@ -311,7 +366,7 @@ async def finish_phone_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === РАССЫЛКА (с поддержкой фото) ===
+# === РАССЫЛКА (с фото) ===
 async def send_message_with_signature(client, chat_id, message, photo_file_id=None):
     signed = f"{message}\n\n—\n📨 Отправлено через [🤖 Бот]({BOT_LINK})"
     try:
@@ -519,7 +574,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Перейди в *Настройки* → *Устройства* → *Добавить устройство*\n"
             "4️⃣ Наведи камеру на QR-код\n"
             "5️⃣ Подтверди вход на телефоне\n"
-            "🔐 *Если появится запрос облачного пароля – введите его прямо сюда, в чат с ботом.*\n"
+            "🔐 *Если появится запрос облачного пароля – введите его прямо сюда, чат с ботом.*\n"
             "⚡ *Быстро и безопасно!*"
         )
         await query.message.reply_text(msg, parse_mode='Markdown')
@@ -529,13 +584,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     elif query.data == 'qr_login':
-        success, img_bytes, url = await generate_qr_code(user_id)
+        user['qr_retry_count'] = 0
+        success, img_bytes, url = await generate_qr_code(user_id, context, query.message.chat_id)
         if success:
             await query.message.reply_text(
                 "📱 *Сканируй QR-код*\n\n"
                 "Telegram → Настройки → Устройства → Добавить устройство\n\n"
                 "🔐 Если потребуется пароль – бот попросит его здесь.\n"
-                "⏳ Ожидание до 2 минут",
+                "⏳ Ожидание до 2 минут\n"
+                "🔄 При истечении QR-код обновится автоматически.",
                 parse_mode='Markdown'
             )
             await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
@@ -597,7 +654,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     elif query.data == 'back_to_menu':
-        # Эта кнопка больше не используется, но оставлена для совместимости
         await show_main_menu(update, context, is_callback=True)
 
     elif query.data == 'start_spam':
@@ -633,7 +689,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# === ЗАПУСК РАССЫЛКИ (ЦИКЛИЧЕСКИ) ===
+# === ЗАПУСК РАССЫЛКИ (циклический) ===
 async def start_spam(update, context, is_callback=False):
     query = update.callback_query if is_callback else None
     user_id = query.from_user.id if is_callback else update.effective_user.id
@@ -702,14 +758,14 @@ async def start_spam(update, context, is_callback=False):
     user['spamming'] = False
     await reply(f"🛑 Рассылка остановлена. Всего отправлено: {sent_total}, ошибок: {errors_total}")
 
-# === ОБРАБОТЧИК ТЕКСТА (включая подписи к фото) ===
+# === ОБРАБОТЧИК ТЕКСТА ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip() if update.message.text else None
     user = get_user_data(user_id)
     chat_id = update.effective_chat.id
 
-    # === Обработка состояний входа ===
+    # Состояния входа
     if user.get('login_state'):
         step = user['login_state']['step']
         if step == 'phone':
@@ -750,7 +806,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update, context)
             return
 
-    # === Обработка ожиданий ввода (группа или сообщение) ===
+    # Ожидание ввода группы или сообщения
     if user.get('awaiting_group'):
         user['awaiting_group'] = False
         if not text:
@@ -775,7 +831,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})", parse_mode='Markdown')
         return
 
-    # === Обработка фото (если пользователь прислал фото для рассылки) ===
+    # Обработка фото
     if update.message.photo:
         photo_file_id = update.message.photo[-1].file_id
         user['photo_file_id'] = photo_file_id
@@ -785,12 +841,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               (f"\nТекст: {user['message'][:50]}..." if user.get('message') else ""))
         return
 
-    # === Проверка подписки ===
+    # Проверка подписки
     if not user['is_subscribed']:
         await update.message.reply_text("⚠️ Подпишитесь на канал. /start")
         return
 
-    # === Команды (без @bot) ===
+    # Команды без @bot
     if text and text.startswith('/'):
         parts = text.split(maxsplit=1)
         raw_cmd = parts[0].strip()
@@ -878,7 +934,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ЗАПУСК ===
 def main():
-    # Загрузка сохранённых сессий
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -895,7 +950,6 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("help", handle_message))
@@ -905,11 +959,7 @@ def main():
     application.add_handler(CommandHandler("stop_spam", handle_message))
     application.add_handler(CommandHandler("status", handle_message))
     application.add_handler(CommandHandler("groups", handle_message))
-
-    # Обработчик кнопок
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Обработчики для текста, фото с подписью и фото без подписи
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.CAPTION, handle_message))
