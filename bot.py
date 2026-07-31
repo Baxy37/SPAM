@@ -79,9 +79,9 @@ def get_user_data(user_id):
             'login_state': None,
             'qr_session': None,
             'qr_checked': False,
-            'photo_file_id': None,      # новое для фото
-            'awaiting_group': False,    # новое для ввода группы
-            'awaiting_msg': False       # новое для ввода сообщения
+            'photo_file_id': None,
+            'awaiting_group': False,
+            'awaiting_msg': False
         }
     return user_data[user_id]
 
@@ -175,9 +175,12 @@ async def check_qr_login(user_id, context, chat_id):
             pass
         except errors.SessionPasswordNeededError:
             user['login_state'] = {'step': 'password', 'client': client, 'qr_login': qr_login}
+            logger.info(f"🔐 Запрос пароля 2FA для пользователя {user_id}")
             await safe_send_message(context, chat_id,
                                     "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):",
                                     reply_markup=add_back_button())
+            # Отправляем напоминание через 5 секунд
+            asyncio.create_task(send_password_reminder(context, chat_id, user_id))
             return False, "PASSWORD_NEEDED"
         except Exception as e:
             logger.error(f"QR check error: {e}")
@@ -196,6 +199,14 @@ async def check_qr_login(user_id, context, chat_id):
         return False, "⏳ Ожидание..."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
+
+async def send_password_reminder(context, chat_id, user_id):
+    await asyncio.sleep(5)
+    user = get_user_data(user_id)
+    if user.get('login_state') and user['login_state'].get('step') == 'password':
+        await safe_send_message(context, chat_id,
+                                "⏳ Напоминаю: введите пароль двухфакторной аутентификации в чат.",
+                                reply_markup=add_back_button())
 
 async def check_qr_status(query, user_id, context):
     if user_id in active_qr_tasks:
@@ -216,6 +227,7 @@ async def check_qr_status(query, user_id, context):
             await show_main_menu_after_login(query, user_id)
             return
         if msg == "PASSWORD_NEEDED":
+            logger.info(f"Ожидание ввода пароля для {user_id}")
             return  # выходим из цикла, ждём ввода пароля в handle_message
         if "ошибка" in msg.lower():
             await safe_send_message(context, chat_id, msg, reply_markup=add_back_button())
@@ -247,6 +259,7 @@ async def finish_qr_with_password(user_id, password):
             f.write(session_string)
         user['login_state'] = None
         user['qr_session'] = None
+        logger.info(f"✅ QR-вход с паролем завершён для {user_id}")
         return True, "✅ Аккаунт успешно авторизован с паролем!"
     except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
@@ -714,7 +727,6 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
                 f"🔄 Цикл завершен. Отправлено в этом цикле: {sent}, ошибок: {errors}. "
                 f"Всего отправлено: {sent_total}. Пауза 2 минуты..."
             )
-            # Ждём 2 минуты с возможностью прерывания
             for _ in range(120):
                 if not user['spamming']:
                     break
@@ -901,7 +913,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await reply_with_back(update, "ℹ️ Неизвестная команда. Используй /help")
             return
     else:
-        # Если не команда – игнорируем, но можно дать подсказку
         if text:
             await reply_with_back(update, "ℹ️ Отправьте команду или воспользуйтесь кнопками.")
 
@@ -955,7 +966,7 @@ def main():
     # Обработчики для текста и фото с подписью
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO & ~filters.CAPTION, handle_message))  # фото без подписи
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.CAPTION, handle_message))
 
     logger.info("Бот запущен...")
 
