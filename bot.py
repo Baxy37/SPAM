@@ -18,7 +18,6 @@ BOT_USERNAME = 'vvfvdfdfbbxng_bot'
 BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 
 # Канал спонсора
-SPONSOR_CHANNEL = '@patrickstarsfarm'
 SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 
 # Хранилище пользователей
@@ -57,8 +56,7 @@ def get_user_data(user_id):
             'session': None,
             'login_state': None,
             'qr_session': None,
-            'qr_checked': False,
-            'main_menu_sent': False  # Флаг, что главное меню с фото уже отправлено
+            'qr_checked': False
         }
     return user_data[user_id]
 
@@ -285,7 +283,6 @@ async def show_main_menu(update, context, is_callback=False):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     user_id = update.effective_user.id
-    user = get_user_data(user_id)
     ready = await is_user_ready(user_id)
     
     status_text = "✅ Аккаунт подключен" if ready else "❌ Аккаунт не подключен"
@@ -293,12 +290,11 @@ async def show_main_menu(update, context, is_callback=False):
     text = (
         f"🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
         f"{status_text}\n\n"
-        "✅ Вы успешно подписались на спонсора!\n"
+        "✅ Вы успешно активировали бота!\n"
         "Теперь вам доступны все функции.\n\n"
         f"📨 Подпись в сообщениях: [🤖 Бот]({BOT_LINK})"
     )
     
-    # Отправляем с фото (ВТОРОЕ СООБЩЕНИЕ)
     if os.path.exists(PHOTO_PATH):
         with open(PHOTO_PATH, 'rb') as photo:
             if is_callback:
@@ -333,16 +329,17 @@ async def show_main_menu(update, context, is_callback=False):
 # ===== ПЕРВОЕ СООБЩЕНИЕ (БЕЗ ФОТО) =====
 async def show_subscription_required(update, is_callback=False):
     keyboard = [
-        [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
-        [InlineKeyboardButton("✅ Проверить подписку", callback_data='check_subscription')],
+        [InlineKeyboardButton("📢 Подписаться на канал", url=SPONSOR_LINK)],
+        [InlineKeyboardButton("✅ Подтвердить подписку", callback_data='check_subscription')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     text = (
         "👋 *Добро пожаловать в бота для рассылки!*\n\n"
-        "Чтобы получить доступ к функциям, подпишитесь на спонсора:\n"
-        "⭐️ *Патрик Stars | Звёзды и подарки бесплатно*\n\n"
-        "После подписки нажмите *'Проверить подписку'*."
+        "Чтобы получить доступ к функциям:\n"
+        "1️⃣ Подписаться на канал\n"
+        "2️⃣ Активировать бота\n\n"
+        "После подписки нажмите *'Подтвердить подписку'*."
     )
     
     if is_callback:
@@ -364,7 +361,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user_data(user_id)
     
     user['subscription_attempts'] = 0
-    user['main_menu_sent'] = False
     
     if user['is_subscribed']:
         await show_main_menu(update, context)
@@ -372,7 +368,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await show_subscription_required(update, is_callback=False)
 
-# ===== ОБРАБОТЧИК КНОПОК (МГНОВЕННЫЙ) =====
+# ===== ОБРАБОТЧИК КНОПОК =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -384,17 +380,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user['subscription_attempts'] == 1:
             keyboard = [
-                [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
-                [InlineKeyboardButton("✅ Я подписался!", callback_data='check_subscription')],
+                [InlineKeyboardButton("📢 Подписаться на канал", url=SPONSOR_LINK)],
+                [InlineKeyboardButton("✅ Активировать бота", callback_data='check_subscription')],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.answer()
             await query.edit_message_text(
-                "❌ *Вы не подписаны на спонсора!*\n\n"
-                "1. Нажмите *'Подписаться'*\n"
-                "2. Подпишитесь на канал\n"
-                "3. Нажмите *'Я подписался!'*",
+                "❌ *Вы не подписаны на канал!*\n\n"
+                "1. Нажмите *'Подписаться на канал'*\n"
+                "2. Подпишитесь\n"
+                "3. Нажмите *'Активировать бота'*",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
@@ -402,19 +398,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user['subscription_attempts'] >= 2:
             user['is_subscribed'] = True
-            user['main_menu_sent'] = False
-            await query.answer("✅ Доступ получен!")
+            await query.answer("✅ Бот активирован!")
             await show_main_menu(update, context, is_callback=True)
             return
     
     # ===== ПРОВЕРКА ПОДПИСКИ ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ =====
     if not user['is_subscribed']:
         await query.answer()
-        await query.edit_message_text("⚠️ Для использования бота подпишитесь на спонсора.")
+        await query.edit_message_text("⚠️ Для использования бота подпишитесь на канал.")
         await show_subscription_required(update, is_callback=True)
         return
     
-    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (МГНОВЕННО) =====
+    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
     await query.answer()
     
     if query.data == 'qr_help':
@@ -582,14 +577,14 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     user['spamming'] = False
     await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
 
-# ===== ОБРАБОТЧИК СООБЩЕНИЙ (БЫСТРЫЙ) =====
+# ===== ОБРАБОТЧИК СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     user = get_user_data(user_id)
     
     if not user['is_subscribed'] and text not in ['/start', '/help']:
-        await update.message.reply_text("⚠️ Для использования бота подпишитесь на спонсора. Используйте /start")
+        await update.message.reply_text("⚠️ Для использования бота подпишитесь на канал. Используйте /start")
         return
     
     if user.get('login_state'):
