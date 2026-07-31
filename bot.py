@@ -3,10 +3,9 @@ import re
 import asyncio
 import threading
 import time
-from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
-from telethon.network import MTProtoSender
+from telethon.tl.functions.messages import GetHistoryRequest
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
@@ -22,7 +21,6 @@ user_messages = {}
 user_spamming = {}
 login_states = {}
 flood_wait_tracker = {}
-user_sessions = {}
 
 # ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 class HealthHandler(BaseHTTPRequestHandler):
@@ -38,43 +36,22 @@ class HealthHandler(BaseHTTPRequestHandler):
 def run_webserver():
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"Веб-сервер на порту {port}")
+    print(f"Web server on port {port}")
     server.serve_forever()
-
-# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ =====
-async def sync_time_with_telegram(client):
-    """Принудительная синхронизация времени с серверами Telegram"""
-    try:
-        # Получаем текущее время с сервера
-        from telethon import utils
-        dc = await client.get_me()
-        return True
-    except:
-        pass
-    
-    try:
-        # Альтернативный метод синхронизации
-        if hasattr(client, '_sender') and client._sender:
-            await client._sender.send_time()
-        return True
-    except Exception as e:
-        print(f"Ошибка синхронизации времени: {e}")
-        return False
 
 # ===== РАБОТА С КЛИЕНТАМИ =====
 def get_client(user_id):
     if user_id not in user_clients:
+        # Используем стандартные параметры как у официального клиента
         client = TelegramClient(
             f'session_{user_id}', 
             API_ID, 
             API_HASH,
-            system_version="4.16.30-vxCUSTOM",
             device_model="Desktop",
+            system_version="Windows 10",
             app_version="4.16.30",
-            connection_retries=5,
-            retry_delay=2,
-            auto_reconnect=True,
-            timeout=30
+            lang_code="en",
+            system_lang_code="en"
         )
         user_clients[user_id] = client
     return user_clients[user_id]
@@ -87,47 +64,23 @@ async def is_user_ready(user_id):
     try:
         if not client.is_connected():
             await client.connect()
-            await sync_time_with_telegram(client)
         return await client.is_user_authorized()
-    except Exception as e:
-        print(f"Ошибка проверки: {e}")
+    except:
         return False
 
-def format_phone_number(phone):
-    """Красиво форматирует номер телефона"""
-    digits = phone[1:] if phone.startswith('+') else phone
-    
-    if digits.startswith('1') and len(digits) >= 11:
-        return f"+1 ({digits[1:4]}) {digits[4:7]}-{digits[7:11]}"
-    elif digits.startswith('7') and len(digits) >= 11:
-        return f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
-    elif digits.startswith('44') and len(digits) >= 12:
-        return f"+44 {digits[2:5]} {digits[5:9]} {digits[9:12]}"
-    elif digits.startswith('380') and len(digits) >= 12:
-        return f"+380 ({digits[3:5]}) {digits[5:8]}-{digits[8:10]}-{digits[10:12]}"
-    
-    if len(digits) > 6:
-        formatted = '+' + digits[:2]
-        for i in range(2, len(digits), 3):
-            formatted += ' ' + digits[i:i+3]
-        return formatted
-    
-    return '+' + digits
-
-# ===== ЛОГИН ПО КОДУ =====
+# ===== ЛОГИН =====
 async def send_code(user_id, phone):
     """Отправляет код подтверждения"""
     
-    # Проверка блокировки
     if user_id in flood_wait_tracker:
         remaining = int(flood_wait_tracker[user_id] - time.time())
         if remaining > 0:
-            minutes = remaining // 60
-            hours = minutes // 60
+            hours = remaining // 3600
+            minutes = (remaining % 3600) // 60
             if hours > 0:
-                return False, f"⏳ Заблокирован на {hours}ч {minutes%60}мин"
+                return False, f"Заблокирован на {hours}ч {minutes}мин"
             else:
-                return False, f"⏳ Заблокирован на {minutes}мин"
+                return False, f"Заблокирован на {minutes}мин"
         else:
             del flood_wait_tracker[user_id]
     
@@ -139,48 +92,40 @@ async def send_code(user_id, phone):
         if not phone_clean.startswith('+'):
             if phone_clean.startswith('8') and len(phone_clean) == 11:
                 phone_clean = '+7' + phone_clean[1:]
-            elif phone_clean.startswith('7') and len(phone_clean) == 11:
+            elif len(phone_clean) == 11 and phone_clean.startswith('7'):
                 phone_clean = '+' + phone_clean
             else:
-                return False, "❌ Введите номер в международном формате: +79998887766"
+                return False, "Введите номер в формате: +79998887766"
         
-        if not re.match(r'^\+\d+$', phone_clean):
-            return False, "❌ Номер должен содержать только + и цифры"
-        
-        digits = phone_clean[1:]
-        if len(digits) < 8 or len(digits) > 15:
-            return False, f"❌ Неверная длина номера ({len(digits)} цифр)"
+        if not re.match(r'^\+\d{8,15}$', phone_clean):
+            return False, "Неверный формат номера"
         
         client = get_client(user_id)
         
-        # Принудительно переподключаемся
+        # Отключаем если был подключен
         if client.is_connected():
             await client.disconnect()
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         
+        # Подключаемся
         await client.connect()
-        
-        # Синхронизируем время
-        await sync_time_with_telegram(client)
         await asyncio.sleep(1)
         
-        # Отправляем запрос кода
+        # Отправляем код
         result = await client.send_code_request(phone_clean)
         
         login_states[user_id] = {
             'step': 'code',
             'phone': phone_clean,
-            'hash': result.phone_code_hash,
-            'time_sent': time.time()
+            'hash': result.phone_code_hash
         }
         
-        phone_display = format_phone_number(phone_clean)
-        
-        return True, f"✅ Код отправлен на {phone_display}\nВведите код из Telegram:"
+        return True, "Код отправлен в Telegram. Введите его:"
     
     except errors.FloodWaitError as e:
         flood_wait_tracker[user_id] = time.time() + e.seconds
         
+        # Очищаем сессию
         if user_id in user_clients:
             try:
                 await user_clients[user_id].disconnect()
@@ -190,46 +135,95 @@ async def send_code(user_id, phone):
         
         session_file = f'session_{user_id}.session'
         if os.path.exists(session_file):
-            try:
-                os.remove(session_file)
-            except:
-                pass
+            os.remove(session_file)
         
-        if e.seconds > 3600:
-            return False, f"🚫 Заблокирован на {e.seconds//3600}ч"
-        else:
-            return False, f"🚫 Заблокирован на {e.seconds//60}мин"
-    
-    except errors.PhoneNumberInvalidError:
-        return False, "❌ Неверный номер. Проверьте код страны."
+        return False, f"Заблокирован на {e.seconds//60}мин"
     
     except Exception as e:
-        return False, f"❌ Ошибка: {str(e)[:100]}"
+        return False, f"Ошибка: {str(e)[:100]}"
 
 async def verify_code(user_id, code):
-    """Проверяет код подтверждения"""
+    """Проверяет код"""
     
     if user_id not in login_states:
-        return False, "❌ Сначала нажмите /login"
+        return False, "Сначала нажмите /login"
     
     data = login_states[user_id]
     
     if user_id not in user_clients:
-        return False, "❌ Сессия потеряна. Нажмите /login заново"
+        return False, "Сессия потеряна. Нажмите /login"
     
     client = user_clients[user_id]
     
     try:
-        # Проверяем соединение и синхронизируем время
         if not client.is_connected():
             await client.connect()
-            await sync_time_with_telegram(client)
             await asyncio.sleep(1)
         
-        # Пробуем войти
-        await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
+        # ВАЖНО: Не передаем phone_code_hash если он не нужен
+        await client.sign_in(
+            phone=data['phone'],
+            code=code,
+            phone_code_hash=data['hash']
+        )
         
-        phone_display = format_phone_number(data['phone'])
+        del login_states[user_id]
+        
+        # Инициализация
+        if user_id not in user_groups:
+            user_groups[user_id] = []
+        if user_id not in user_messages:
+            user_messages[user_id] = ""
+        if user_id not in user_spamming:
+            user_spamming[user_id] = False
+        
+        return True, "✅ Успешный вход!"
+    
+    except errors.SessionPasswordNeededError:
+        # Нужен 2FA пароль
+        login_states[user_id]['step'] = '2fa'
+        return False, "Введите пароль двухфакторной аутентификации:"
+    
+    except errors.PhoneCodeExpiredError:
+        try:
+            # Переподключаемся
+            if client.is_connected():
+                await client.disconnect()
+                await asyncio.sleep(1)
+            
+            await client.connect()
+            await asyncio.sleep(1)
+            
+            new_result = await client.send_code_request(data['phone'])
+            login_states[user_id]['hash'] = new_result.phone_code_hash
+            return False, "Код истек. Отправлен новый код:"
+        except Exception as e:
+            del login_states[user_id]
+            return False, f"Ошибка: {str(e)[:100]}"
+    
+    except errors.PhoneCodeInvalidError:
+        return False, "Неверный код"
+    
+    except errors.FloodWaitError as e:
+        del login_states[user_id]
+        return False, f"Заблокирован на {e.seconds//60}мин"
+    
+    except Exception as e:
+        error_str = str(e)
+        return False, f"Ошибка: {error_str[:100]}"
+
+async def verify_2fa(user_id, password):
+    """Проверяет пароль 2FA"""
+    
+    if user_id not in login_states or login_states[user_id].get('step') != '2fa':
+        return False, "Сначала введите код"
+    
+    data = login_states[user_id]
+    client = user_clients[user_id]
+    
+    try:
+        await client.sign_in(password=password)
+        
         del login_states[user_id]
         
         if user_id not in user_groups:
@@ -239,76 +233,32 @@ async def verify_code(user_id, code):
         if user_id not in user_spamming:
             user_spamming[user_id] = False
         
-        return True, f"✅ Успешный вход!\n📱 {phone_display}\n\nИспользуйте:\n/add_group @username\n/set_msg текст\n/start_spam"
+        return True, "✅ Успешный вход!"
     
-    except errors.PhoneCodeExpiredError:
-        # Код истек - отправляем новый
-        try:
-            # Переподключаемся и синхронизируем время
-            if client.is_connected():
-                await client.disconnect()
-                await asyncio.sleep(2)
-            
-            await client.connect()
-            await sync_time_with_telegram(client)
-            await asyncio.sleep(1)
-            
-            new_result = await client.send_code_request(data['phone'])
-            login_states[user_id]['hash'] = new_result.phone_code_hash
-            login_states[user_id]['time_sent'] = time.time()
-            login_states[user_id]['attempts'] = login_states[user_id].get('attempts', 0) + 1
-            return False, "⚠️ Код истек. Новый код отправлен. Введите:"
-        except errors.FloodWaitError as e:
-            del login_states[user_id]
-            return False, f"🚫 Много попыток. Ждите {e.seconds//60}мин"
-    
-    except errors.PhoneCodeInvalidError:
-        return False, "❌ Неверный код. Попробуйте еще раз."
-    
-    except errors.FloodWaitError as e:
-        del login_states[user_id]
-        return False, f"🚫 Заблокирован на {e.seconds//60}мин"
+    except errors.PasswordHashInvalidError:
+        return False, "Неверный пароль"
     
     except Exception as e:
-        error_str = str(e)
-        # Если ошибка времени - пробуем ещё раз с синхронизацией
-        if 'TIME' in error_str.upper() or 'SYNC' in error_str.upper():
-            try:
-                await client.disconnect()
-                await asyncio.sleep(3)
-                await client.connect()
-                await sync_time_with_telegram(client)
-                await asyncio.sleep(2)
-                
-                await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
-                
-                phone_display = format_phone_number(data['phone'])
-                del login_states[user_id]
-                return True, f"✅ Вход выполнен!\n📱 {phone_display}"
-            except Exception as retry_error:
-                return False, f"❌ Ошибка синхронизации времени. Попробуйте /login заново"
-        
-        return False, f"❌ Ошибка: {error_str[:100]}"
+        return False, f"Ошибка: {str(e)[:100]}"
 
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("🔑 Войти в аккаунт", callback_data='login')],
+        [InlineKeyboardButton("🔑 Войти", callback_data='login')],
         [InlineKeyboardButton("➕ Добавить группу", callback_data='add_group')],
-        [InlineKeyboardButton("📝 Установить сообщение", callback_data='set_msg')],
-        [InlineKeyboardButton("🚀 Запустить рассылку", callback_data='start_spam')],
-        [InlineKeyboardButton("🛑 Остановить рассылку", callback_data='stop_spam')],
+        [InlineKeyboardButton("📝 Сообщение", callback_data='set_msg')],
+        [InlineKeyboardButton("🚀 Запустить", callback_data='start_spam')],
+        [InlineKeyboardButton("🛑 Остановить", callback_data='stop_spam')],
         [InlineKeyboardButton("📊 Статус", callback_data='status')],
-        [InlineKeyboardButton("📋 Список групп", callback_data='groups')],
+        [InlineKeyboardButton("📋 Группы", callback_data='groups')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
-        "📱 Поддерживаются номера всех стран\n"
-        "⚠️ Не входите слишком часто - будет блокировка\n\n"
-        "Выберите действие:",
-        parse_mode='Markdown',
+        "🤖 Бот для рассылки\n\n"
+        "⚠️ После получения кода НЕ сообщайте его никому!\n"
+        "Вводите код только в этом боте.\n\n"
+        "Если вход заблокирован - подождите и попробуйте позже.",
         reply_markup=reply_markup
     )
 
@@ -323,34 +273,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if remaining > 0:
                 hours = remaining // 3600
                 minutes = (remaining % 3600) // 60
-                if hours > 0:
-                    await query.edit_message_text(f"🚫 Заблокирован на {hours}ч {minutes}мин")
-                else:
-                    await query.edit_message_text(f"🚫 Заблокирован на {minutes}мин")
+                await query.edit_message_text(f"🚫 Заблокирован на {hours}ч {minutes}мин")
                 return
         
         ready = await is_user_ready(user_id)
         if ready:
-            await query.edit_message_text("✅ Вы уже авторизованы!")
+            await query.edit_message_text("✅ Уже авторизованы")
             return
         
         login_states[user_id] = {'step': 'phone'}
-        await query.edit_message_text(
-            "📱 Введите номер телефона:\n"
-            "+79998887766"
-        )
+        await query.edit_message_text("📱 Введите номер:\n+79998887766")
     
     elif query.data == 'add_group':
-        await query.edit_message_text(
-            "`/add_group @username`\nПример: `/add_group @durov`",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("/add_group @username")
     
     elif query.data == 'set_msg':
-        await query.edit_message_text(
-            "`/set_msg Текст`\nПример: `/set_msg Привет!`",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("/set_msg Текст")
     
     elif query.data == 'start_spam':
         await start_spam_process(update, context, is_callback=True)
@@ -361,34 +299,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'status':
         ready = await is_user_ready(user_id)
-        blocked = ""
-        if user_id in flood_wait_tracker:
-            remaining = int(flood_wait_tracker[user_id] - time.time())
-            if remaining > 0:
-                blocked = f"\n• Блокировка: {remaining//3600}ч {(remaining%3600)//60}мин"
-        
-        groups_count = len(user_groups.get(user_id, []))
-        message = user_messages.get(user_id, "")
-        spamming = user_spamming.get(user_id, False)
-        
         await query.edit_message_text(
-            f"📊 *Статус:*\n"
-            f"• Аккаунт: {'✅ Авторизован' if ready else '❌ Не авторизован'}{blocked}\n"
-            f"• Групп: {groups_count}\n"
-            f"• Сообщение: {message[:50] if message else '❌ Не задано'}\n"
-            f"• Рассылка: {'🔄 Активна' if spamming else '⏸ Остановлена'}",
-            parse_mode='Markdown'
+            f"📊 Статус:\n"
+            f"Аккаунт: {'✅' if ready else '❌'}\n"
+            f"Групп: {len(user_groups.get(user_id, []))}\n"
+            f"Рассылка: {'🔄' if user_spamming.get(user_id, False) else '⏸'}"
         )
     
     elif query.data == 'groups':
         groups = user_groups.get(user_id, [])
         if not groups:
-            await query.edit_message_text("📭 Нет групп")
+            await query.edit_message_text("Нет групп")
         else:
-            await query.edit_message_text(
-                f"📋 *Группы ({len(groups)}):*\n" + '\n'.join(groups),
-                parse_mode='Markdown'
-            )
+            await query.edit_message_text('\n'.join(groups))
 
 async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
     if is_callback:
@@ -401,19 +324,19 @@ async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     ready = await is_user_ready(user_id)
     if not ready:
-        await reply_func("❌ Сначала войдите в аккаунт")
+        await reply_func("❌ Сначала войдите")
         return
     
     if user_id not in user_messages or not user_messages[user_id]:
-        await reply_func("❌ Установите сообщение: /set_msg")
+        await reply_func("❌ /set_msg текст")
         return
     
     if user_id not in user_groups or not user_groups[user_id]:
-        await reply_func("❌ Добавьте группы: /add_group")
+        await reply_func("❌ /add_group @username")
         return
     
     if user_spamming.get(user_id, False):
-        await reply_func("⚠️ Рассылка уже идет!")
+        await reply_func("⚠️ Уже запущена")
         return
     
     user_spamming[user_id] = True
@@ -424,61 +347,64 @@ async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await reply_func(f"🚀 Отправка в {len(groups)} групп...")
     
     sent = 0
-    errors_count = 0
+    errors = 0
     
-    for i, group in enumerate(groups, 1):
+    for group in groups:
         if not user_spamming.get(user_id, False):
-            await reply_func(f"🛑 Остановлено. Отправлено: {sent}")
             break
         
         try:
             await client.send_message(group, msg)
             sent += 1
-            await reply_func(f"✅ [{i}/{len(groups)}] {group}")
         except errors.FloodWaitError as e:
-            await reply_func(f"⏳ Пауза {e.seconds}с...")
             await asyncio.sleep(e.seconds + 1)
             try:
                 await client.send_message(group, msg)
                 sent += 1
             except:
-                errors_count += 1
-        except Exception as e:
-            errors_count += 1
-            await reply_func(f"❌ [{i}/{len(groups)}] Ошибка")
+                errors += 1
+        except:
+            errors += 1
         
         await asyncio.sleep(3)
     
     user_spamming[user_id] = False
-    await reply_func(f"✅ Завершено! Отправлено: {sent}, ошибок: {errors_count}")
+    await reply_func(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
+    # Обработка логина
     if user_id in login_states:
-        step = login_states[user_id]['step']
+        state = login_states[user_id]
         
-        if step == 'phone':
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            success, error = await send_code(user_id, text)
-            await update.message.reply_text(error)
+        if state['step'] == 'phone':
+            success, msg = await send_code(user_id, text)
+            await update.message.reply_text(msg)
             if not success and user_id in login_states:
                 del login_states[user_id]
         
-        elif step == 'code':
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            success, error = await verify_code(user_id, text)
-            await update.message.reply_text(error)
+        elif state['step'] == 'code':
+            success, msg = await verify_code(user_id, text)
+            await update.message.reply_text(msg)
+            if success:
+                await update.message.reply_text("Используйте:\n/add_group @username\n/set_msg текст\n/start_spam")
+        
+        elif state.get('step') == '2fa':
+            success, msg = await verify_2fa(user_id, text)
+            await update.message.reply_text(msg)
+            if success:
+                await update.message.reply_text("Используйте:\n/add_group @username\n/set_msg текст\n/start_spam")
         
         return
     
+    # Команды
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await update.message.reply_text("❌ /add_group @username")
+            await update.message.reply_text("/add_group @username")
             return
-        
         group = parts[1].strip()
         if not group.startswith('@'):
             group = '@' + group
@@ -487,88 +413,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_groups[user_id] = []
         
         if group in user_groups[user_id]:
-            await update.message.reply_text(f"⚠️ Уже есть: {group}")
+            await update.message.reply_text(f"Уже есть: {group}")
         else:
             user_groups[user_id].append(group)
-            await update.message.reply_text(f"✅ Добавлено: {group} ({len(user_groups[user_id])})")
+            await update.message.reply_text(f"✅ {group}")
     
     elif text.startswith('/set_msg'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await update.message.reply_text("❌ /set_msg текст")
+            await update.message.reply_text("/set_msg текст")
             return
-        
         user_messages[user_id] = parts[1].strip()
-        await update.message.reply_text(f"✅ Сообщение сохранено")
+        await update.message.reply_text("✅ Сообщение сохранено")
     
     elif text == '/login':
         if user_id in flood_wait_tracker:
             remaining = int(flood_wait_tracker[user_id] - time.time())
             if remaining > 0:
-                hours = remaining // 3600
-                minutes = (remaining % 3600) // 60
-                await update.message.reply_text(f"🚫 Заблокирован на {hours}ч {minutes}мин")
+                await update.message.reply_text(f"Заблокирован на {remaining//60}мин")
                 return
         
         ready = await is_user_ready(user_id)
         if ready:
-            await update.message.reply_text("✅ Уже авторизованы!")
+            await update.message.reply_text("✅ Уже авторизованы")
             return
         
         login_states[user_id] = {'step': 'phone'}
         await update.message.reply_text("📱 Введите номер:\n+79998887766")
     
-    elif text == '/status':
-        ready = await is_user_ready(user_id)
-        blocked = ""
-        if user_id in flood_wait_tracker:
-            remaining = int(flood_wait_tracker[user_id] - time.time())
-            if remaining > 0:
-                blocked = f"\n• Блокировка: {remaining//3600}ч {(remaining%3600)//60}мин"
-        
-        await update.message.reply_text(
-            f"📊 *Статус:*\n"
-            f"• Аккаунт: {'✅ Авторизован' if ready else '❌ Не авторизован'}{blocked}\n"
-            f"• Групп: {len(user_groups.get(user_id, []))}\n"
-            f"• Сообщение: {user_messages.get(user_id, '❌')[:50]}\n"
-            f"• Рассылка: {'🔄 Активна' if user_spamming.get(user_id, False) else '⏸ Остановлена'}",
-            parse_mode='Markdown'
-        )
-    
-    elif text == '/groups':
-        groups = user_groups.get(user_id, [])
-        if not groups:
-            await update.message.reply_text("📭 Групп нет")
-        else:
-            await update.message.reply_text(f"📋 Группы ({len(groups)}):\n" + '\n'.join(groups))
-    
     elif text == '/start_spam':
-        await start_spam_process(update, context, is_callback=False)
+        await start_spam_process(update, context)
     
     elif text == '/stop_spam':
         user_spamming[user_id] = False
         await update.message.reply_text("🛑 Остановлено")
     
+    elif text == '/status':
+        ready = await is_user_ready(user_id)
+        await update.message.reply_text(
+            f"Аккаунт: {'✅' if ready else '❌'}\n"
+            f"Групп: {len(user_groups.get(user_id, []))}\n"
+            f"Рассылка: {'🔄' if user_spamming.get(user_id, False) else '⏸'}"
+        )
+    
+    elif text == '/groups':
+        groups = user_groups.get(user_id, [])
+        await update.message.reply_text('\n'.join(groups) if groups else "Нет групп")
+    
     elif text == '/help':
         await update.message.reply_text(
-            "/start - Меню\n"
             "/login - Войти\n"
-            "/add_group @name - Добавить группу\n"
+            "/add_group @name - Группа\n"
             "/set_msg текст - Сообщение\n"
-            "/start_spam - Запустить\n"
-            "/stop_spam - Остановить\n"
+            "/start_spam - Рассылка\n"
+            "/stop_spam - Стоп\n"
             "/status - Статус\n"
-            "/groups - Список групп"
+            "/groups - Группы"
         )
     
     elif text == '/start':
         await start(update, context)
-    
-    else:
-        await update.message.reply_text("ℹ️ Используйте /start")
 
 # ===== ЗАПУСК =====
 def main():
+    # Очистка старых сессий
     for file in os.listdir('.'):
         if file.startswith('session_') and file.endswith('.session'):
             try:
@@ -581,17 +489,12 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("login", handle_message))
-    app.add_handler(CommandHandler("status", handle_message))
-    app.add_handler(CommandHandler("groups", handle_message))
-    app.add_handler(CommandHandler("start_spam", handle_message))
-    app.add_handler(CommandHandler("stop_spam", handle_message))
     app.add_handler(CommandHandler("help", handle_message))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("Бот запущен!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("Bot started!")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
