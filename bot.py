@@ -341,7 +341,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
     
-    # Если уже есть клиент - проверяем подписку
     if user['client'] and await is_user_ready(user_id):
         is_subscribed = await check_subscription_status(user['client'], user_id)
         if is_subscribed:
@@ -358,7 +357,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
-    # ===== ПРОВЕРКА ПОДПИСКИ =====
     if query.data == 'check_subscription':
         if not user['client'] or not await is_user_ready(user_id):
             await query.edit_message_text("⚠️ Сначала авторизуйтесь в аккаунте Telegram.")
@@ -385,13 +383,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     
-    # ===== ПРОВЕРКА ПОДПИСКИ ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ =====
     if not user['is_subscribed']:
         await query.edit_message_text("⚠️ Для использования бота подпишитесь на спонсора.")
         await show_subscription_required(update, is_callback=True)
         return
     
-    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
     if query.data == 'qr_help':
         msg = await get_qr_instructions()
         await query.edit_message_text(msg, parse_mode='Markdown')
@@ -551,12 +547,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = get_user_data(user_id)
     
-    # Проверка подписки для команд
     if not user['is_subscribed'] and text not in ['/start', '/help']:
         await update.message.reply_text("⚠️ Для использования бота подпишитесь на спонсора. Используйте /start")
         return
     
-    # Логин по номеру
     if user.get('login_state'):
         step = user['login_state'].get('step')
         
@@ -584,7 +578,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg)
             return
     
-    # Обработка команд
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -676,7 +669,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
-    # Загрузка сохраненных сессий
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
