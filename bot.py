@@ -1,27 +1,11 @@
 import os
 import asyncio
 import threading
-import ntplib
-import time
-from datetime import datetime, timezone
+import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-
-# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ =====
-def sync_time():
-    """Синхронизирует системное время через NTP"""
-    try:
-        client = ntplib.NTPClient()
-        response = client.request('pool.ntp.org', version=3)
-        # Вычисляем разницу и корректируем
-        os.system(f'date -s "@{int(response.tx_time)}"')
-        print(f"✅ Время синхронизировано: {datetime.fromtimestamp(response.tx_time)}")
-        return True
-    except Exception as e:
-        print(f"⚠️ Не удалось синхронизировать время: {e}")
-        return False
 
 # ===== КОНФИГ =====
 API_ID = 36474738
@@ -33,9 +17,19 @@ user_clients = {}
 user_groups = {}
 user_messages = {}
 user_spamming = {}
-login_states = {}  # {user_id: {'step': 'phone'/'code', 'phone': str, 'hash': str}}
+login_states = {}
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
+# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ =====
+def sync_time():
+    try:
+        subprocess.run(['ntpdate', '-u', 'pool.ntp.org'], capture_output=True, timeout=10)
+        print("✅ Время синхронизировано")
+        return True
+    except Exception as e:
+        print(f"⚠️ Ошибка синхронизации: {e}")
+        return False
+
+# ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -46,7 +40,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 def run_webserver():
     port = int(os.environ.get('PORT', 8080))
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"✅ Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
 # ===== РАБОТА С КЛИЕНТАМИ =====
@@ -63,7 +56,7 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН ПО КОДУ (с синхронизацией времени) =====
+# ===== ЛОГИН ПО КОДУ =====
 async def start_login(user_id, phone):
     try:
         client = get_client(user_id)
@@ -90,7 +83,6 @@ async def complete_login(user_id, code):
         del login_states[user_id]
         return True, None
     except errors.PhoneCodeExpiredError:
-        # Код истек — автоматически синхронизируем время и отправляем новый
         sync_time()
         try:
             new_result = await client.send_code_request(data['phone'])
@@ -108,15 +100,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await update.message.reply_text(
         f"🤖 Бот для рассылки\n\n"
-        f"Ваш ID: `{user_id}`\n\n"
         "🔑 /login — войти по номеру и коду\n"
         "➕ /add_group @chat — добавить группу\n"
         "📝 /set_msg Текст — установить сообщение\n"
         "🚀 /start_spam — запустить рассылку\n"
         "🛑 /stop_spam — остановить\n"
         "📊 /status — проверить статус\n"
-        "📋 /groups — список групп",
-        parse_mode='Markdown'
+        "📋 /groups — список групп"
     )
 
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -126,9 +116,7 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Вы уже авторизованы!")
         return
     
-    # Синхронизируем время перед входом
     sync_time()
-    
     login_states[user_id] = {'step': 'phone'}
     await update.message.reply_text(
         "📱 Введите номер телефона в формате:\n"
@@ -148,10 +136,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if step == 'phone':
         success, error = await start_login(user_id, text)
         if success:
-            await update.message.reply_text(
-                "✅ Код отправлен в Telegram!\n"
-                "Введите код цифрами:"
-            )
+            await update.message.reply_text("✅ Код отправлен в Telegram!\nВведите код цифрами:")
         else:
             await update.message.reply_text(f"❌ Ошибка: {error}\nПопробуйте /login заново")
             del login_states[user_id]
@@ -167,7 +152,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id not in user_spamming:
                 user_spamming[user_id] = False
         else:
-            if "Код истек" in error or "отправлен новый код" in error:
+            if "Код истек" in error:
                 await update.message.reply_text(f"⚠️ {error}")
             else:
                 await update.message.reply_text(f"❌ {error}\nПопробуйте /login заново")
@@ -185,8 +170,20 @@ async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if group not in user_groups[user_id]:
         user_groups[user_id].append(group)
         await update.message.reply_text(f"✅ Добавлено: {group}")
-    else:
-        await update.message.reply_text(f"⚠️ Группа уже есть: {group}")
+
+async def add_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("❌ Укажите группы: /add_groups @g1 @g2 @g3")
+        return
+    if user_id not in user_groups:
+        user_groups[user_id] = []
+    added = []
+    for g in context.args:
+        if g not in user_groups[user_id]:
+            user_groups[user_id].append(g)
+            added.append(g)
+    await update.message.reply_text(f"✅ Добавлено групп: {len(added)}\n{', '.join(added) if added else 'Ничего не добавлено'}")
 
 async def set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -263,17 +260,14 @@ async def groups_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
-    # Синхронизируем время при старте
     sync_time()
-    
-    # Запускаем веб-сервер
     threading.Thread(target=run_webserver, daemon=True).start()
     
-    # Запускаем бота
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login))
     app.add_handler(CommandHandler("add_group", add_group))
+    app.add_handler(CommandHandler("add_groups", add_groups))
     app.add_handler(CommandHandler("set_msg", set_msg))
     app.add_handler(CommandHandler("start_spam", start_spam))
     app.add_handler(CommandHandler("stop_spam", stop_spam))
@@ -281,7 +275,7 @@ def main():
     app.add_handler(CommandHandler("groups", groups_list))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен! Время синхронизировано.")
+    print("✅ Бот запущен! Вход только по номеру и коду.")
     app.run_polling()
 
 if __name__ == "__main__":
