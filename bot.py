@@ -56,7 +56,8 @@ def get_user_data(user_id):
             'client': None,
             'session': None,
             'login_state': None,
-            'qr_session': None
+            'qr_session': None,
+            'qr_checked': False
         }
     return user_data[user_id]
 
@@ -114,6 +115,7 @@ async def generate_qr_code(user_id):
             'qr_login': qr_login,
             'created_at': time.time()
         }
+        user['qr_checked'] = False
         
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(qr_login.url)
@@ -141,6 +143,7 @@ async def check_qr_login(user_id):
             session_string = client.session.save()
             user['client'] = client
             user['session'] = session_string
+            user['qr_checked'] = True
             
             with open(f'session_string_{user_id}.txt', 'w') as f:
                 f.write(session_string)
@@ -227,7 +230,6 @@ async def send_message_with_signature(client, chat_id, message):
 
 # ===== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТПРАВКИ С ФОТО =====
 async def send_with_photo(target, text, reply_markup=None, parse_mode='Markdown', is_callback=False):
-    """Отправляет сообщение с фото M.png если файл существует"""
     if os.path.exists(PHOTO_PATH):
         with open(PHOTO_PATH, 'rb') as photo:
             if is_callback:
@@ -275,8 +277,14 @@ async def show_main_menu(update, context, is_callback=False):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    user_id = update.effective_user.id
+    ready = await is_user_ready(user_id)
+    
+    status_text = "✅ Аккаунт подключен" if ready else "❌ Аккаунт не подключен"
+    
     text = (
-        "🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
+        f"🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
+        f"{status_text}\n\n"
         "✅ Вы успешно подписались на спонсора!\n"
         "Теперь вам доступны все функции.\n\n"
         f"📨 Подпись в сообщениях: [🤖 Бот]({BOT_LINK})"
@@ -329,7 +337,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'check_subscription':
         user['subscription_attempts'] += 1
         
-        # Первое нажатие
         if user['subscription_attempts'] == 1:
             keyboard = [
                 [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
@@ -348,7 +355,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Второе нажатие - показываем главное меню
         if user['subscription_attempts'] >= 2:
             user['is_subscribed'] = True
             await query.answer("✅ Доступ получен!")
@@ -362,7 +368,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_subscription_required(update, is_callback=True)
         return
     
-    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (БЫСТРЫЙ ОТВЕТ) =====
+    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
     await query.answer()
     
     if query.data == 'qr_help':
@@ -372,13 +378,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'qr_login':
         success, img_bytes, url = await generate_qr_code(user_id)
         if success:
-            # Отправляем инструкцию с фото
             await send_with_photo(
                 query,
                 "📱 *Сканируй QR-код*\n\nTelegram → Настройки → Устройства → Добавить устройство\n\n⏳ Действует: 60 секунд",
                 is_callback=True
             )
-            # Отправляем QR-код
             await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
             asyncio.create_task(check_qr_status(query, user_id))
         else:
@@ -393,18 +397,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif query.data == 'add_group':
+        keyboard = [
+            [InlineKeyboardButton("📝 Ввести username", switch_inline_query_current_chat="/add_group ")],
+            [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await send_with_photo(
             query,
-            "📤 Отправь команду:\n`/add_group @username`\n\nПример: `/add_group @durov`",
+            "📤 *Добавление группы*\n\n"
+            "✏️ Впишите *username* или *ссылку* на группу,\n"
+            "в которую вы будете отправлять сообщения.\n\n"
+            "📌 *Примеры:*\n"
+            "• `@durov`\n"
+            "• `https://t.me/durov`\n\n"
+            "👇 Нажмите кнопку и введите данные:",
+            reply_markup=reply_markup,
             is_callback=True
         )
     
     elif query.data == 'set_msg':
+        keyboard = [
+            [InlineKeyboardButton("📝 Ввести текст", switch_inline_query_current_chat="/set_msg ")],
+            [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await send_with_photo(
             query,
-            "📤 Отправь команду:\n`/set_msg Твой текст`\n\nПример: `/set_msg Привет всем!`",
+            "📝 *Установка сообщения*\n\n"
+            "✏️ Введите текст сообщения,\n"
+            "которое будет отправляться в группы.\n\n"
+            "📌 *Пример:*\n"
+            "`Всем привет! Это тестовое сообщение.`\n\n"
+            "👇 Нажмите кнопку и введите текст:",
+            reply_markup=reply_markup,
             is_callback=True
         )
+    
+    elif query.data == 'back_to_menu':
+        await show_main_menu(update, context, is_callback=True)
     
     elif query.data == 'start_spam':
         await start_spam(update, context, is_callback=True)
@@ -434,18 +466,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'groups':
         groups = user.get('groups', [])
         if not groups:
-            text = "📭 Нет групп. Добавь через /add_group"
+            text = "📭 Нет групп. Добавьте через '➕ Добавить группу'"
         else:
             text = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups])
         await send_with_photo(query, text, is_callback=True)
 
 async def check_qr_status(query, user_id):
+    user = get_user_data(user_id)
+    
     for i in range(20):
         await asyncio.sleep(3)
+        
+        if user.get('qr_checked'):
+            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+            return
+        
         success, msg = await check_qr_login(user_id)
         if success:
-            await query.message.reply_text("✅ QR-вход успешен!")
+            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
+    
     await query.message.reply_text("⏰ QR-код истек. Попробуйте снова.")
 
 # ===== ЗАПУСК РАССЫЛКИ =====
@@ -453,29 +493,27 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     if is_callback:
         query = update.callback_query
         user_id = query.from_user.id
-        reply_func = query.edit_message_text
-        send_func = send_with_photo
+        send_func = lambda text, markup=None: send_with_photo(query, text, markup, is_callback=True)
     else:
         user_id = update.effective_user.id
-        reply_func = update.message.reply_text
-        send_func = send_with_photo
+        send_func = lambda text, markup=None: send_with_photo(update.message, text, markup)
     
     user = get_user_data(user_id)
     
     if not await is_user_ready(user_id):
-        await send_func(update, "❌ Сначала войдите в аккаунт", is_callback=is_callback)
+        await send_func("❌ Сначала войдите в аккаунт")
         return
     
     if not user.get('message'):
-        await send_func(update, "❌ Сначала установите сообщение: /set_msg", is_callback=is_callback)
+        await send_func("❌ Сначала установите сообщение через '📝 Установить сообщение'")
         return
     
     if not user.get('groups'):
-        await send_func(update, "❌ Сначала добавьте группы: /add_group", is_callback=is_callback)
+        await send_func("❌ Сначала добавьте группы через '➕ Добавить группу'")
         return
     
     if user.get('spamming', False):
-        await send_func(update, "⚠️ Рассылка уже идет!", is_callback=is_callback)
+        await send_func("⚠️ Рассылка уже идет!")
         return
     
     user['spamming'] = True
@@ -483,15 +521,15 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     groups = user['groups'].copy()
     msg = user['message']
     
-    await send_func(update, f"🚀 Начинаю рассылку в {len(groups)} групп...", is_callback=is_callback)
-    await send_func(update, f"📨 В конце каждого сообщения будет подпись: [🤖 Бот]({BOT_LINK})", is_callback=is_callback)
+    await send_func(f"🚀 Начинаю рассылку в {len(groups)} групп...")
+    await send_func(f"📨 В конце каждого сообщения будет подпись: [🤖 Бот]({BOT_LINK})")
     
     sent = 0
     errors = 0
     
     for i, group in enumerate(groups, 1):
         if not user['spamming']:
-            await send_func(update, f"🛑 Остановлено. Отправлено: {sent}", is_callback=is_callback)
+            await send_func(f"🛑 Остановлено. Отправлено: {sent}")
             break
         
         try:
@@ -501,10 +539,10 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
             else:
                 errors += 1
             if i % 5 == 0:
-                await send_func(update, f"✅ {i}/{len(groups)} отправлено", is_callback=is_callback)
+                await send_func(f"✅ {i}/{len(groups)} отправлено")
         except errors.FloodWaitError as e:
             wait_time = e.seconds + 2
-            await send_func(update, f"⏳ Ожидание {wait_time} сек (флуд)...", is_callback=is_callback)
+            await send_func(f"⏳ Ожидание {wait_time} сек (флуд)...")
             await asyncio.sleep(wait_time)
             success = await send_message_with_signature(client, group, msg)
             if success:
@@ -517,7 +555,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
         await asyncio.sleep(3)
     
     user['spamming'] = False
-    await send_func(update, f"✅ Готово! Отправлено: {sent}, ошибок: {errors}", is_callback=is_callback)
+    await send_func(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
 
 # ===== ОБРАБОТЧИК СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -559,11 +597,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_with_photo(update.message, "❌ /add_group @username")
+            await send_with_photo(update.message, "❌ Введите username группы после команды.\nПример: `/add_group @durov`")
             return
         
         group = parts[1].strip()
-        if not group.startswith('@'):
+        if not group.startswith('@') and not group.startswith('https://t.me/'):
             group = '@' + group
         
         if group in user.get('groups', []):
@@ -576,7 +614,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith('/set_msg'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_with_photo(update.message, "❌ /set_msg Текст")
+            await send_with_photo(update.message, "❌ Введите текст сообщения после команды.\nПример: `/set_msg Всем привет!`")
             return
         
         user['message'] = parts[1].strip()
