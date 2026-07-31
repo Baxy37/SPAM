@@ -11,14 +11,14 @@ API_ID = 36474738
 API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
 
-# Хранилище данных пользователей
+# Хранилище
 user_clients = {}
 user_groups = {}
 user_messages = {}
 user_spamming = {}
-login_states = {}  # {user_id: {'step': 'phone'/'code'/'password', 'phone': str, 'hash': str}}
+login_states = {}  # {user_id: {'phone': str}}
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
+# ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -45,73 +45,29 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН С ПОДДЕРЖКОЙ ПАРОЛЯ =====
-async def start_login(user_id, phone):
+# ===== ЛОГИН ТОЛЬКО ПО ПАРОЛЮ (БЕЗ КОДА) =====
+async def login_with_password(user_id, phone, password):
     try:
         client = get_client(user_id)
         await client.connect()
-        result = await client.send_code_request(phone)
-        login_states[user_id] = {
-            'step': 'code',
-            'phone': phone,
-            'hash': result.phone_code_hash
-        }
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-async def complete_login(user_id, code_or_password):
-    if user_id not in login_states:
-        return False, "Сначала используйте /login"
-    
-    data = login_states[user_id]
-    client = get_client(user_id)
-    
-    # Пробуем войти по коду
-    try:
-        await client.sign_in(data['phone'], code_or_password, phone_code_hash=data['hash'])
-        del login_states[user_id]
-        return True, None
-    except errors.SessionPasswordNeededError:
-        # Если включена двухфакторная авторизация — запрашиваем пароль
-        login_states[user_id]['step'] = 'password'
-        return False, "🔐 Введите ваш пароль от аккаунта (Two-Factor Password):"
-    except errors.PhoneCodeExpiredError:
-        # Код истек — отправляем новый и переключаемся на пароль
+        
+        # Отправляем запрос кода, но он нам не нужен, мы его игнорируем
+        # Это нужно только для того, чтобы Telegram понял, что мы пытаемся войти
         try:
-            new_result = await client.send_code_request(data['phone'])
-            login_states[user_id]['hash'] = new_result.phone_code_hash
-            return False, "⚠️ Код истек. Если у вас включен пароль — введите его сейчас. Если нет — запросите новый код через /login"
-        except Exception as e:
-            return False, f"Ошибка: {str(e)}"
-    except errors.PhoneCodeInvalidError:
-        # Если код неверный, но пароль есть — пробуем пароль
-        try:
-            await client.sign_in(password=code_or_password)
-            del login_states[user_id]
-            return True, None
-        except errors.PasswordHashInvalidError:
-            return False, "❌ Неверный пароль. Попробуйте снова."
-        except Exception as e:
-            return False, f"Ошибка входа по паролю: {str(e)}"
-    except Exception as e:
-        return False, str(e)
-
-async def complete_password_login(user_id, password):
-    if user_id not in login_states:
-        return False, "Сначала используйте /login"
-    
-    data = login_states[user_id]
-    client = get_client(user_id)
-    
-    try:
+            await client.send_code_request(phone)
+        except:
+            pass  # Игнорируем ошибки кода, нам нужен только пароль
+        
+        # Сразу пробуем войти по паролю (2FA)
         await client.sign_in(password=password)
-        del login_states[user_id]
         return True, None
     except errors.PasswordHashInvalidError:
-        return False, "❌ Неверный пароль. Попробуйте снова."
+        return False, "❌ Неверный пароль. Попробуйте еще раз."
+    except errors.SessionPasswordNeededError:
+        # Если вдруг пароль не сработал, но включена 2FA
+        return False, "❌ Пароль не подошел. Убедитесь, что включен двухфакторный пароль."
     except Exception as e:
-        return False, str(e)
+        return False, f"Ошибка: {str(e)}"
 
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -119,7 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 Бот для рассылки\n\n"
         f"Ваш ID: `{user_id}`\n\n"
-        "🔑 /login — войти по номеру и коду/паролю\n"
+        "🔑 /login — войти по номеру и ПАРОЛЮ (без кода!)\n"
         "➕ /add_group @chat — добавить группу\n"
         "📝 /set_msg Текст — установить сообщение\n"
         "🚀 /start_spam — запустить рассылку\n"
@@ -138,7 +94,7 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     login_states[user_id] = {'step': 'phone'}
     await update.message.reply_text(
-        "📱 Введите номер телефона в формате:\n"
+        "📱 Введите ваш номер телефона в формате:\n"
         "+79998887766"
     )
 
@@ -150,40 +106,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ℹ️ Используйте /login для входа")
         return
     
-    step = login_states[user_id]['step']
+    step = login_states[user_id].get('step')
     
     if step == 'phone':
-        success, error = await start_login(user_id, text)
-        if success:
-            await update.message.reply_text("✅ Код отправлен в Telegram!\nВведите код, либо сразу пароль (если код не пришел):")
-        else:
-            await update.message.reply_text(f"❌ Ошибка: {error}\nПопробуйте /login заново")
-            del login_states[user_id]
-    
-    elif step == 'code':
-        success, error = await complete_login(user_id, text)
-        if success:
-            await update.message.reply_text("✅ Аккаунт авторизован! Можно работать.")
-            if user_id not in user_groups:
-                user_groups[user_id] = []
-            if user_id not in user_messages:
-                user_messages[user_id] = ""
-            if user_id not in user_spamming:
-                user_spamming[user_id] = False
-        else:
-            if "введите ваш пароль" in error.lower() or "🔐" in error:
-                login_states[user_id]['step'] = 'password'
-                await update.message.reply_text(error)
-            elif "Неверный код" in error:
-                await update.message.reply_text(error)
-            else:
-                await update.message.reply_text(f"❌ {error}\nПопробуйте /login заново")
-                del login_states[user_id]
+        # Сохраняем номер и переходим к запросу пароля
+        login_states[user_id]['phone'] = text
+        login_states[user_id]['step'] = 'password'
+        await update.message.reply_text(
+            "🔐 Введите ваш **пароль** от аккаунта (Two-Factor Password).\n\n"
+            "⚠️ Код из СМС/Telegram НЕ нужен! Только пароль, который вы установили в настройках."
+        )
     
     elif step == 'password':
-        success, error = await complete_password_login(user_id, text)
+        phone = login_states[user_id].get('phone')
+        if not phone:
+            await update.message.reply_text("❌ Ошибка. Попробуйте /login заново")
+            del login_states[user_id]
+            return
+        
+        # Пробуем войти по паролю
+        success, error = await login_with_password(user_id, phone, text)
+        
         if success:
-            await update.message.reply_text("✅ Аккаунт авторизован по паролю! Можно работать.")
+            await update.message.reply_text("✅ Аккаунт успешно авторизован по паролю! Можно работать.")
+            del login_states[user_id]
             if user_id not in user_groups:
                 user_groups[user_id] = []
             if user_id not in user_messages:
@@ -191,7 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id not in user_spamming:
                 user_spamming[user_id] = False
         else:
-            await update.message.reply_text(f"❌ {error}")
+            await update.message.reply_text(f"{error}\nПопробуйте еще раз или /login заново")
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,8 +151,6 @@ async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if group not in user_groups[user_id]:
         user_groups[user_id].append(group)
         await update.message.reply_text(f"✅ Добавлено: {group}")
-    else:
-        await update.message.reply_text(f"⚠️ Группа уже есть: {group}")
 
 async def set_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -221,7 +165,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ready = await is_user_ready(user_id)
     
     if not ready:
-        await update.message.reply_text("❌ Сначала авторизуйтесь: /login")
+        await update.message.reply_text("❌ Сначала авторизуйтесь через /login (введите пароль!)")
         return
     if user_id not in user_messages or not user_messages[user_id]:
         await update.message.reply_text("❌ Сначала установите сообщение: /set_msg")
@@ -296,7 +240,7 @@ def main():
     app.add_handler(CommandHandler("groups", groups_list))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен! Поддерживается вход по номеру + паролю.")
+    print("✅ Бот запущен! Вход ТОЛЬКО по паролю, код не требуется.")
     app.run_polling()
 
 if __name__ == "__main__":
