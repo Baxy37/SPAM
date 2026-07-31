@@ -43,10 +43,18 @@ def run_webserver():
 def normalize_phone(phone):
     """Очищает номер телефона от лишних символов, оставляет цифры и +"""
     cleaned = ''.join(ch for ch in phone if ch.isdigit() or ch == '+')
-    # Если нет +, добавляем
     if not cleaned.startswith('+'):
         cleaned = '+' + cleaned
     return cleaned
+
+async def safe_send_message(context, chat_id, text, parse_mode='Markdown', reply_markup=None):
+    """Надёжная отправка сообщения через context.bot"""
+    try:
+        await context.bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+        return True
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
+        return False
 
 # ===== ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ =====
 def get_user_data(user_id):
@@ -130,7 +138,7 @@ async def generate_qr_code(user_id):
     except Exception as e:
         return False, None, str(e)
 
-async def check_qr_login(user_id):
+async def check_qr_login(user_id, context, chat_id):
     user = get_user_data(user_id)
     qr_data = user.get('qr_session')
     if not qr_data:
@@ -157,8 +165,13 @@ async def check_qr_login(user_id):
                 'client': client,
                 'qr_login': qr_login
             }
-            return False, "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):"
+            await safe_send_message(
+                context, chat_id,
+                "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):"
+            )
+            return False, "PASSWORD_NEEDED"
         except Exception as e:
+            print(f"Ошибка в check_qr_login: {e}")
             pass
         if await client.is_user_authorized():
             session_string = client.session.save()
@@ -186,38 +199,31 @@ async def check_qr_login(user_id):
             pass
         return False, f"❌ Ошибка: {str(e)}"
 
-async def check_qr_status(query, user_id):
+async def check_qr_status(query, user_id, context):
     if user_id in active_qr_tasks:
         active_qr_tasks[user_id].cancel()
     active_qr_tasks[user_id] = asyncio.current_task()
 
-    user = get_user_data(user_id)
+    chat_id = query.message.chat_id
+    await safe_send_message(context, chat_id, "⏳ Ожидание сканирования QR-кода...")
+
     for i in range(30):
         await asyncio.sleep(2)
-        success, msg = await check_qr_login(user_id)
+        success, msg = await check_qr_login(user_id, context, chat_id)
         if success:
-            try:
-                await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-            except:
-                pass
+            await safe_send_message(context, chat_id, "✅ QR-вход успешен! Аккаунт авторизован.")
             await show_main_menu_after_login(query, user_id)
             return
-        if "пароль" in msg.lower():
-            try:
-                await query.message.reply_text(msg)
-                await query.message.delete()
-            except:
-                pass
+        if msg == "PASSWORD_NEEDED":
+            return
+        if "ошибка" in msg.lower():
+            await safe_send_message(context, chat_id, msg)
             return
         if i % 5 == 0 and i > 0:
-            try:
-                await query.message.edit_text(f"⏳ Ожидание сканирования... ({i*2} сек)")
-            except:
-                pass
-    try:
-        await query.message.reply_text("⏰ QR-код истек. Попробуйте снова.")
-    except:
-        pass
+            await safe_send_message(context, chat_id, f"⏳ Ожидание сканирования... ({i*2} сек)")
+
+    await safe_send_message(context, chat_id, "⏰ QR-код истек. Попробуйте снова.")
+    user = get_user_data(user_id)
     if user.get('qr_session'):
         try:
             await user['qr_session']['client'].disconnect()
@@ -247,9 +253,8 @@ async def finish_qr_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# ===== ВХОД ПО НОМЕРУ (С НОРМАЛИЗАЦИЕЙ И ЗАЩИТОЙ ОТ ФЛУДА) =====
+# ===== ВХОД ПО НОМЕРУ =====
 async def send_code_phone(user_id, phone):
-    # Нормализуем номер на всякий случай
     phone = normalize_phone(phone)
     try:
         client = get_client(user_id)
@@ -269,7 +274,7 @@ async def send_code_phone(user_id, phone):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-async def verify_code_phone(user_id, code):
+async def verify_code_phone(user_id, code, context, chat_id):
     user = get_user_data(user_id)
     login_data = user.get('login_state')
     if not login_data or login_data.get('step') != 'code':
@@ -287,15 +292,19 @@ async def verify_code_phone(user_id, code):
         return True, "✅ Аккаунт авторизован!"
     except errors.PasswordNeededError:
         user['login_state'] = {'step': 'password_phone', 'client': client, 'phone': phone}
-        return False, "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):"
+        await safe_send_message(context, chat_id, "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
+        return False, "PASSWORD_NEEDED"
     except errors.PhoneCodeExpiredError:
-        return False, "⚠️ Код истек. Начните заново через /start"
+        user['login_state'] = None
+        return False, "⚠️ Код истек. Запросите новый код через повторный ввод номера."
     except errors.PhoneCodeInvalidError:
-        return False, "❌ Неверный код. Попробуйте снова."
+        user['login_state'] = None
+        return False, "❌ Неверный код. Запросите новый код через повторный ввод номера."
     except errors.FloodWaitError as e:
         wait_min = e.seconds // 60
         return False, f"⏳ Слишком много попыток. Подождите {wait_min} минут. Используйте QR-код."
     except Exception as e:
+        user['login_state'] = None
         return False, f"❌ Ошибка: {str(e)}"
 
 async def finish_phone_with_password(user_id, password):
@@ -471,6 +480,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await show_subscription_required(update, is_callback=False)
 
+# ===== КОМАНДА /reset =====
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user_data(user_id)
+    user['login_state'] = None
+    user['qr_session'] = None
+    user['spamming'] = False
+    if user.get('client'):
+        try:
+            await user['client'].disconnect()
+        except:
+            pass
+        user['client'] = None
+    await update.message.reply_text("🔄 Состояние сброшено. Можете начать заново.")
+    await show_main_menu(update, context)
+
 # ===== ОБРАБОТЧИК КНОПОК =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -559,7 +584,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.delete()
             except:
                 pass
-            asyncio.create_task(check_qr_status(query, user_id))
+            # Запускаем проверку с передачей context
+            asyncio.create_task(check_qr_status(query, user_id, context))
         else:
             await query.message.reply_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
             try:
@@ -761,6 +787,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     user = get_user_data(user_id)
+    chat_id = update.effective_chat.id
 
     if not user['is_subscribed'] and text not in ['/start', '/help']:
         await update.message.reply_text("⚠️ Для использования бота подпишитесь на канал. Используйте /start")
@@ -769,7 +796,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.get('login_state'):
         step = user['login_state'].get('step')
         if step == 'phone':
-            # Нормализуем номер перед отправкой
             normalized = normalize_phone(text)
             success, msg = await send_code_phone(user_id, normalized)
             if success:
@@ -779,18 +805,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user['login_state'] = None
             return
         elif step == 'code':
-            success, msg = await verify_code_phone(user_id, text)
+            success, msg = await verify_code_phone(user_id, text, context, chat_id)
             if success:
                 await update.message.reply_text(msg)
-                if not user.get('groups'):
-                    user['groups'] = []
-                if not user.get('message'):
-                    user['message'] = ""
-                if not user.get('spamming'):
-                    user['spamming'] = False
                 user['login_state'] = None
+                await show_main_menu(update, context)
             else:
-                await update.message.reply_text(msg)
+                if msg == "PASSWORD_NEEDED":
+                    # пароль уже запрошен внутри verify_code_phone, ничего не пишем
+                    pass
+                else:
+                    await update.message.reply_text(msg)
             return
         elif step == 'password':
             success, msg = await finish_qr_with_password(user_id, text)
@@ -838,10 +863,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == '/start':
         await start(update, context)
         return
+    if text == '/reset':
+        await reset(update, context)
+        return
     if text == '/help':
         await update.message.reply_text(
             "📋 *Команды:*\n\n"
             "/start - Главное меню\n"
+            "/reset - Сбросить состояние входа\n"
             "/add_group @name - Добавить группу\n"
             "/set_msg текст - Установить сообщение\n"
             "/start_spam - Запустить рассылку\n"
@@ -888,6 +917,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
+    # Загрузка сохранённых сессий
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -905,6 +935,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", handle_message))
     app.add_handler(CommandHandler("add_group", handle_message))
     app.add_handler(CommandHandler("set_msg", handle_message))
