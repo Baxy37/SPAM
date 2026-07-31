@@ -24,6 +24,9 @@ SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 # Хранилище пользователей
 user_data = {}
 
+# Путь к фото
+PHOTO_PATH = 'M.png'
+
 # ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -54,7 +57,8 @@ def get_user_data(user_id):
             'session': None,
             'login_state': None,
             'qr_session': None,
-            'qr_checked': False
+            'qr_checked': False,
+            'main_menu_sent': False  # Флаг, что главное меню с фото уже отправлено
         }
     return user_data[user_id]
 
@@ -265,7 +269,7 @@ async def send_message_with_signature(client, chat_id, message):
         except:
             return False
 
-# ===== ГЛАВНОЕ МЕНЮ (БЫСТРО) =====
+# ===== ГЛАВНОЕ МЕНЮ (С ФОТО) =====
 async def show_main_menu(update, context, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📱 Вход по QR", callback_data='qr_login')],
@@ -281,6 +285,7 @@ async def show_main_menu(update, context, is_callback=False):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     user_id = update.effective_user.id
+    user = get_user_data(user_id)
     ready = await is_user_ready(user_id)
     
     status_text = "✅ Аккаунт подключен" if ready else "❌ Аккаунт не подключен"
@@ -293,19 +298,39 @@ async def show_main_menu(update, context, is_callback=False):
         f"📨 Подпись в сообщениях: [🤖 Бот]({BOT_LINK})"
     )
     
-    if is_callback:
-        await update.callback_query.edit_message_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
+    # Отправляем с фото (ВТОРОЕ СООБЩЕНИЕ)
+    if os.path.exists(PHOTO_PATH):
+        with open(PHOTO_PATH, 'rb') as photo:
+            if is_callback:
+                await update.callback_query.message.reply_photo(
+                    photo=photo,
+                    caption=text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+                await update.callback_query.message.delete()
+            else:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=text,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
     else:
-        await update.message.reply_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
+        if is_callback:
+            await update.callback_query.edit_message_text(
+                text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
 
+# ===== ПЕРВОЕ СООБЩЕНИЕ (БЕЗ ФОТО) =====
 async def show_subscription_required(update, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
@@ -339,6 +364,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user_data(user_id)
     
     user['subscription_attempts'] = 0
+    user['main_menu_sent'] = False
     
     if user['is_subscribed']:
         await show_main_menu(update, context)
@@ -376,6 +402,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user['subscription_attempts'] >= 2:
             user['is_subscribed'] = True
+            user['main_menu_sent'] = False
             await query.answer("✅ Доступ получен!")
             await show_main_menu(update, context, is_callback=True)
             return
@@ -712,6 +739,10 @@ def main():
     
     print("✅ Бот запущен (БЫСТРЫЙ РЕЖИМ)!")
     print(f"🔗 Подпись: {BOT_LINK}")
+    if os.path.exists(PHOTO_PATH):
+        print(f"📷 Фото {PHOTO_PATH} будет отправлено с главным меню")
+    else:
+        print(f"⚠️ Фото {PHOTO_PATH} не найдено")
     app.run_polling()
 
 if __name__ == "__main__":
