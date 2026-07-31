@@ -1,7 +1,9 @@
 import os
 import asyncio
 import threading
-import subprocess
+import ntplib
+import time
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telegram import Update
@@ -19,15 +21,30 @@ user_messages = {}
 user_spamming = {}
 login_states = {}
 
-# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ =====
+# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ (без прав администратора) =====
 def sync_time():
+    """Синхронизирует время через NTP (не требует прав root)"""
     try:
-        subprocess.run(['ntpdate', '-u', 'pool.ntp.org'], capture_output=True, timeout=10)
-        print("✅ Время синхронизировано")
-        return True
+        client = ntplib.NTPClient()
+        response = client.request('pool.ntp.org', version=3)
+        # Просто выводим точное время — это помогает Telethon
+        # Telethon использует системное время, но если мы его не меняем,
+        # то хотя бы знаем расхождение
+        ntp_time = datetime.fromtimestamp(response.tx_time, tz=timezone.utc)
+        local_time = datetime.now(timezone.utc)
+        diff = (ntp_time - local_time).total_seconds()
+        print(f"🕐 NTP время: {ntp_time.strftime('%H:%M:%S')}")
+        print(f"🕐 Локальное время: {local_time.strftime('%H:%M:%S')}")
+        print(f"📊 Расхождение: {diff:.2f} секунд")
+        
+        # Если расхождение больше 2 секунд — Telethon может не работать
+        if abs(diff) > 2:
+            print("⚠️ ВНИМАНИЕ: Большое расхождение времени!")
+            print("💡 Рекомендуем переключиться на вход по QR-коду (/qr)")
+        return diff
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации: {e}")
-        return False
+        return None
 
 # ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
@@ -56,7 +73,7 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН ПО КОДУ =====
+# ===== ЛОГИН =====
 async def start_login(user_id, phone):
     try:
         client = get_client(user_id)
@@ -87,7 +104,7 @@ async def complete_login(user_id, code):
         try:
             new_result = await client.send_code_request(data['phone'])
             login_states[user_id]['hash'] = new_result.phone_code_hash
-            return False, "⏰ Код истек. Время синхронизировано, отправлен новый код. Введите его:"
+            return False, "⏰ Код истек. Отправлен новый код. Введите его:"
         except Exception as e:
             return False, f"Ошибка: {str(e)}"
     except errors.PhoneCodeInvalidError:
@@ -101,6 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🤖 Бот для рассылки\n\n"
         "🔑 /login — войти по номеру и коду\n"
+        "📱 /qr — войти по QR-коду (рекомендуется, если код не работает)\n"
         "➕ /add_group @chat — добавить группу\n"
         "📝 /set_msg Текст — установить сообщение\n"
         "🚀 /start_spam — запустить рассылку\n"
@@ -158,6 +176,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ {error}\nПопробуйте /login заново")
                 del login_states[user_id]
 
+# ===== QR-ВХОД (на случай, если код не работает) =====
+async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    ready = await is_user_ready(user_id)
+    if ready:
+        await update.message.reply_text("✅ Вы уже авторизованы!")
+        return
+    
+    await update.message.reply_text("⏳ Генерирую QR-код...")
+    
+    try:
+        client = get_client(user_id)
+        await client.connect()
+        qr_login_obj = await client.qr_login()
+        
+        img = await qr_login_obj.qr_code()
+        img_path = f'qr_{user_id}.png'
+        img.save(img_path)
+        
+        with open(img_path, 'rb') as f:
+            await update.message.reply_photo(
+                photo=f,
+                caption=(
+                    "📸 **Отсканируйте QR-код**\n\n"
+                    "1️⃣ Откройте Telegram на телефоне\n"
+                    "2️⃣ Настройки → Устройства → Сканировать QR\n"
+                    "3️⃣ Наведите на этот код\n"
+                    "4️⃣ Нажмите 'Подтвердить'\n\n"
+                    "⏳ Код действует 60 секунд."
+                ),
+                parse_mode='Markdown'
+            )
+        
+        os.remove(img_path)
+        
+        try:
+            await qr_login_obj.wait(60)
+            await update.message.reply_text("✅ Аккаунт успешно авторизован! 🎉")
+            if user_id not in user_groups:
+                user_groups[user_id] = []
+            if user_id not in user_messages:
+                user_messages[user_id] = ""
+            if user_id not in user_spamming:
+                user_spamming[user_id] = False
+        except asyncio.TimeoutError:
+            await update.message.reply_text("⏰ Время истекло. Попробуйте /qr заново.")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {str(e)}\nПопробуйте /login.")
+
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -198,7 +267,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ready = await is_user_ready(user_id)
     
     if not ready:
-        await update.message.reply_text("❌ Сначала авторизуйтесь: /login")
+        await update.message.reply_text("❌ Сначала авторизуйтесь: /login или /qr")
         return
     if user_id not in user_messages or not user_messages[user_id]:
         await update.message.reply_text("❌ Сначала установите сообщение: /set_msg")
@@ -266,6 +335,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login))
+    app.add_handler(CommandHandler("qr", qr))
     app.add_handler(CommandHandler("add_group", add_group))
     app.add_handler(CommandHandler("add_groups", add_groups))
     app.add_handler(CommandHandler("set_msg", set_msg))
@@ -275,7 +345,8 @@ def main():
     app.add_handler(CommandHandler("groups", groups_list))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен! Вход только по номеру и коду.")
+    print("✅ Бот запущен!")
+    print("💡 Если код не работает — используйте /qr для входа по QR-коду.")
     app.run_polling()
 
 if __name__ == "__main__":
