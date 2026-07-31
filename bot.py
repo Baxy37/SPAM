@@ -15,7 +15,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 API_ID = 36474738
 API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
-BOT_USERNAME = 'ваш_бот_username'  # ЗАМЕНИТЕ НА ВАШ!
+BOT_USERNAME = 'vvfvdfdfbbxng_bot'
 
 # Ссылка на бота для подписи
 BOT_LINK = f"https://t.me/{BOT_USERNAME}"
@@ -28,7 +28,7 @@ user_spamming = {}
 login_states = {}
 flood_wait_tracker = {}
 user_string_sessions = {}
-qr_sessions = {}  # Для хранения QR-кодов
+qr_sessions = {}
 
 # ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
@@ -42,7 +42,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         pass
 
 def run_webserver():
-    port = int(os.environ.get('PORT', 8080))
+    port = int(os.environ.get('PORT', 8888))
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
     print(f"✅ Веб-сервер запущен на порту {port}")
     server.serve_forever()
@@ -88,11 +88,10 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД АВТОРИЗАЦИЯ (как в Джарвисе) =====
+# ===== QR-КОД АВТОРИЗАЦИЯ =====
 async def generate_qr_code(user_id):
-    """Генерирует QR-код для входа как в Джарвисе"""
+    """Генерирует QR-код для входа"""
     try:
-        # Создаем клиент для QR-входа
         client = TelegramClient(
             StringSession(),
             API_ID,
@@ -104,17 +103,14 @@ async def generate_qr_code(user_id):
         
         await client.connect()
         
-        # Генерируем QR-код
         qr_login = await client.qr_login()
         
-        # Сохраняем данные для проверки
         qr_sessions[user_id] = {
             'client': client,
             'qr_login': qr_login,
             'created_at': time.time()
         }
         
-        # Создаем изображение QR-кода
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_L,
@@ -126,7 +122,6 @@ async def generate_qr_code(user_id):
         
         img = qr.make_image(fill_color="black", back_color="white")
         
-        # Сохраняем в байты
         img_bytes = io.BytesIO()
         img.save(img_bytes, format='PNG')
         img_bytes.seek(0)
@@ -142,23 +137,18 @@ async def check_qr_login(user_id):
     
     data = qr_sessions[user_id]
     try:
-        # Проверяем статус
         result = await data['qr_login'].wait()
         
         if result is not None:
-            # Вход успешен
             client = data['client']
             session_string = client.session.save()
             
-            # Сохраняем сессию
             user_string_sessions[user_id] = session_string
             user_clients[user_id] = client
             
-            # Сохраняем файл
             with open(f'session_string_{user_id}.txt', 'w') as f:
                 f.write(session_string)
             
-            # Инициализируем хранилища
             if user_id not in user_groups:
                 user_groups[user_id] = []
             if user_id not in user_messages:
@@ -175,7 +165,7 @@ async def check_qr_login(user_id):
 
 async def get_qr_instructions():
     return """
-📱 *ВХОД ПО QR-КОДУ (как в Джарвисе)*
+📱 *ВХОД ПО QR-КОДУ*
 
 1️⃣ Нажми кнопку *"Сгенерировать QR"* ниже
 
@@ -193,7 +183,7 @@ async def get_qr_instructions():
 ИЛИ используй вход по номеру телефона.
 """
 
-# ===== ЛОГИН ПО НОМЕРУ (как в Джарвисе) =====
+# ===== ЛОГИН ПО НОМЕРУ =====
 async def send_code_phone(user_id, phone):
     try:
         client = get_client(user_id)
@@ -243,7 +233,6 @@ async def send_message_with_signature(client, chat_id, message):
         await client.send_message(chat_id, signed_message, parse_mode='Markdown')
         return True
     except Exception as e:
-        # Если Markdown не поддерживается, отправляем без форматирования
         try:
             plain_message = f"{message}\n\n—\n📨 Отправлено через бот: {BOT_LINK}"
             await client.send_message(chat_id, plain_message)
@@ -254,7 +243,7 @@ async def send_message_with_signature(client, chat_id, message):
 # ===== КОМАНДЫ =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📱 Вход по QR (как в Джарвисе)", callback_data='qr_login')],
+        [InlineKeyboardButton("📱 Вход по QR", callback_data='qr_login')],
         [InlineKeyboardButton("📱 Инструкция QR", callback_data='qr_help')],
         [InlineKeyboardButton("📱 Вход по номеру", callback_data='phone_login')],
         [InlineKeyboardButton("➕ Добавить группу", callback_data='add_group')],
@@ -266,15 +255,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    # Проверяем, есть ли файл M.png
+    photo_path = 'M.png'
+    caption = (
         "🤖 *БОТ ДЛЯ РАССЫЛКИ*\n\n"
-        "Войдите как в *Jarvis*:\n"
-        "• QR-код (быстро и безопасно)\n"
+        "Войдите в аккаунт:\n"
+        "• QR-код\n"
         "• Или по номеру телефона\n\n"
-        f"📨 Все сообщения будут с подписью: [🤖 Бот]({BOT_LINK})",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
+        f"📨 Все сообщения будут с подписью: [🤖 Бот]({BOT_LINK})"
     )
+    
+    if os.path.exists(photo_path):
+        # Отправляем с фото
+        with open(photo_path, 'rb') as photo:
+            await update.message.reply_photo(
+                photo=photo,
+                caption=caption,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+    else:
+        # Если фото нет, отправляем без фото
+        await update.message.reply_text(
+            caption,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -294,13 +300,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏳ Действует: 60 секунд",
                 parse_mode='Markdown'
             )
-            # Отправляем изображение QR-кода
             await query.message.reply_photo(
                 photo=img_bytes,
                 caption="📸 Отсканируй QR-код для входа"
             )
             
-            # Запускаем проверку статуса
             asyncio.create_task(check_qr_status(query, user_id))
         else:
             await query.edit_message_text(f"❌ Ошибка: {url}")
@@ -310,7 +314,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📱 Введите номер телефона:\n"
             "Пример: `+998901234567`\n\n"
-            "Код придет в Telegram",
+            "Код придет в Telegram\n\n"
+            "⚠️ *Если вход по номеру не работает, используйте QR-код*",
             parse_mode='Markdown'
         )
     
@@ -363,7 +368,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_qr_status(query, user_id):
     """Проверяет статус QR-входа каждые 3 секунды"""
-    for i in range(20):  # 20 попыток (60 секунд)
+    for i in range(20):
         await asyncio.sleep(3)
         success, msg = await check_qr_login(user_id)
         if success:
@@ -417,7 +422,6 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
             break
         
         try:
-            # Отправляем с подписью
             success = await send_message_with_signature(client, group, msg)
             if success:
                 sent += 1
@@ -430,7 +434,6 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
             wait_time = e.seconds + 2
             await reply(f"⏳ Ожидание {wait_time} сек (флуд)...")
             await asyncio.sleep(wait_time)
-            # Пробуем еще раз
             success = await send_message_with_signature(client, group, msg)
             if success:
                 sent += 1
@@ -451,7 +454,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    # Обработка входа по номеру
     if user_id in login_states:
         step = login_states[user_id]['step']
         
@@ -479,7 +481,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg)
             return
     
-    # Остальные команды
     if text.startswith('/session'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -637,7 +638,6 @@ async def login_with_session(user_id, session_string):
 
 # ===== ЗАПУСК =====
 def main():
-    # Восстанавливаем сессии
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -666,7 +666,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен с QR-входом (как в Джарвисе)!")
+    print("✅ Бот запущен с QR-входом!")
     print(f"🔗 Подпись: {BOT_LINK}")
     app.run_polling()
 
