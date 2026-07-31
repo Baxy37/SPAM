@@ -21,7 +21,7 @@ SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 PHOTO_PATH = 'M.png'
 
 user_data = {}
-active_qr_tasks = {}  # для отслеживания активных задач
+active_qr_tasks = {}
 
 # ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
@@ -39,7 +39,7 @@ def run_webserver():
     print(f"✅ Веб-сервер запущен на порту {port}")
     server.serve_forever()
 
-# ===== РАБОТА С ДАННЫМИ =====
+# ===== ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ =====
 def get_user_data(user_id):
     if user_id not in user_data:
         user_data[user_id] = {
@@ -91,7 +91,7 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД (ПОЛНАЯ ПОДДЕРЖКА 2FA) =====
+# ===== QR-КОД С ПОДДЕРЖКОЙ 2FA =====
 async def generate_qr_code(user_id):
     try:
         client = TelegramClient(
@@ -129,7 +129,6 @@ async def check_qr_login(user_id):
     try:
         client = qr_data['client']
         qr_login = qr_data['qr_login']
-        # Пытаемся получить результат
         try:
             result = await qr_login.wait(timeout=1)
             if result is not None:
@@ -144,7 +143,6 @@ async def check_qr_login(user_id):
         except asyncio.TimeoutError:
             pass
         except errors.PasswordNeededError:
-            # Требуется облачный пароль
             user['login_state'] = {
                 'step': 'password',
                 'client': client,
@@ -152,10 +150,7 @@ async def check_qr_login(user_id):
             }
             return False, "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):"
         except Exception as e:
-            # Любая ошибка – пробуем проверить авторизацию
             pass
-
-        # Проверяем, может уже авторизован
         if await client.is_user_authorized():
             session_string = client.session.save()
             user['client'] = client
@@ -167,7 +162,6 @@ async def check_qr_login(user_id):
             return True, "✅ Вход по QR-коду успешен!"
         return False, "⏳ Ожидание сканирования..."
     except Exception as e:
-        # Последняя проверка
         try:
             if await qr_data['client'].is_user_authorized():
                 client = qr_data['client']
@@ -184,13 +178,12 @@ async def check_qr_login(user_id):
         return False, f"❌ Ошибка: {str(e)}"
 
 async def check_qr_status(query, user_id):
-    # Отменяем предыдущую задачу, если была
     if user_id in active_qr_tasks:
         active_qr_tasks[user_id].cancel()
     active_qr_tasks[user_id] = asyncio.current_task()
 
     user = get_user_data(user_id)
-    for i in range(30):  # 30 попыток по 2 секунды = 60 секунд
+    for i in range(30):
         await asyncio.sleep(2)
         success, msg = await check_qr_login(user_id)
         if success:
@@ -245,7 +238,7 @@ async def finish_qr_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# ===== ЛОГИН ПО НОМЕРУ (С ЗАЩИТОЙ ОТ ФЛУДА) =====
+# ===== ВХОД ПО НОМЕРУ (С ЗАЩИТОЙ ОТ ФЛУДА) =====
 async def send_code_phone(user_id, phone):
     try:
         client = get_client(user_id)
@@ -260,8 +253,8 @@ async def send_code_phone(user_id, phone):
         }
         return True, "✅ Код отправлен в Telegram!"
     except errors.FloodWaitError as e:
-        wait = e.seconds + 5
-        return False, f"⏳ Слишком много попыток. Подождите {wait//60} минут."
+        wait_min = e.seconds // 60
+        return False, f"⏳ Слишком много попыток. Подождите {wait_min} минут. Используйте QR-код (он не подвержен флуду)."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -283,15 +276,14 @@ async def verify_code_phone(user_id, code):
         return True, "✅ Аккаунт авторизован!"
     except errors.PasswordNeededError:
         user['login_state'] = {'step': 'password_phone', 'client': client, 'phone': phone}
-        return False, "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль:"
+        return False, "🔐 Требуется пароль двухфакторной аутентификации. Введите пароль (напишите его в чат):"
     except errors.PhoneCodeExpiredError:
-        # Код истек – можно отправить новый, но учитываем флуд
         return False, "⚠️ Код истек. Начните заново через /start"
     except errors.PhoneCodeInvalidError:
         return False, "❌ Неверный код. Попробуйте снова."
     except errors.FloodWaitError as e:
-        wait = e.seconds + 2
-        return False, f"⏳ Подождите {wait} секунд перед повторной попыткой."
+        wait_min = e.seconds // 60
+        return False, f"⏳ Слишком много попыток. Подождите {wait_min} минут. Используйте QR-код."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -315,7 +307,7 @@ async def finish_phone_with_password(user_id, password):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# ===== ОТПРАВКА СООБЩЕНИЙ С ПОДПИСЬЮ =====
+# ===== ОТПРАВКА СООБЩЕНИЙ =====
 async def send_message_with_signature(client, chat_id, message):
     signed_message = f"{message}\n\n—\n📨 Отправлено через [🤖 Бот]({BOT_LINK})"
     try:
@@ -329,9 +321,9 @@ async def send_message_with_signature(client, chat_id, message):
         except:
             return False
 
-# ===== ОТОБРАЖЕНИЕ МЕНЮ (ОПТИМИЗИРОВАННОЕ) =====
+# ===== ОТОБРАЖЕНИЕ МЕНЮ =====
 async def send_menu_message(target, text, reply_markup, photo_bytes=None):
-    for attempt in range(2):  # только 2 попытки, чтобы не тормозить
+    for attempt in range(2):
         try:
             if photo_bytes:
                 await target.reply_photo(
@@ -350,7 +342,6 @@ async def send_menu_message(target, text, reply_markup, photo_bytes=None):
         except (TimedOut, RetryAfter):
             await asyncio.sleep(1)
         except Exception:
-            # падаем на текстовую версию
             try:
                 await target.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
                 return True
@@ -457,10 +448,13 @@ async def show_subscription_required(update, is_callback=False):
     else:
         await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
 
-# ===== КОМАНДА /start =====
+# ===== КОМАНДА /start (СБРАСЫВАЕТ СОСТОЯНИЕ) =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
+    # Сбрасываем все попытки входа
+    user['login_state'] = None
+    user['qr_session'] = None
     user['subscription_attempts'] = 0
     if user['is_subscribed']:
         await show_main_menu(update, context)
@@ -473,7 +467,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user = get_user_data(user_id)
 
-    # Обработка подписки
     if query.data == 'check_subscription':
         user['subscription_attempts'] += 1
         if user['subscription_attempts'] == 1:
@@ -522,7 +515,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
 
-    # Обработка действий
     if query.data == 'qr_help':
         msg = """
 📱 *ВХОД ПО QR-КОДУ*
@@ -669,7 +661,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# ===== ЗАПУСК РАССЫЛКИ (ОПТИМИЗИРОВАННЫЙ) =====
+# ===== ЗАПУСК РАССЫЛКИ =====
 async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
     if is_callback:
         query = update.callback_query
@@ -744,7 +736,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
                 errors += 1
         except:
             errors += 1
-        await asyncio.sleep(2)  # уменьшил задержку для скорости
+        await asyncio.sleep(2)
     user['spamming'] = False
     await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
     if is_callback:
@@ -753,7 +745,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
         except:
             pass
 
-# ===== ОБРАБОТЧИК СООБЩЕНИЙ =====
+# ===== ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
@@ -763,6 +755,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Для использования бота подпишитесь на канал. Используйте /start")
         return
 
+    # Обработка состояний входа
     if user.get('login_state'):
         step = user['login_state'].get('step')
         if step == 'phone':
@@ -786,6 +779,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user['login_state'] = None
             else:
                 await update.message.reply_text(msg)
+                # Если требуется пароль, состояние остаётся, и пользователь может ввести пароль
             return
         elif step == 'password':
             success, msg = await finish_qr_with_password(user_id, text)
@@ -802,6 +796,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update, context)
             return
 
+    # Обработка команд
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
