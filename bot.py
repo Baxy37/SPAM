@@ -95,7 +95,7 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД (НОВАЯ ЛОГИКА) =====
+# ===== QR-КОД (ФИНАЛЬНАЯ ВЕРСИЯ) =====
 async def generate_qr_code(user_id):
     try:
         client = TelegramClient(
@@ -136,7 +136,7 @@ async def check_qr_login(user_id):
         return False, "QR-сессия не найдена"
     
     try:
-        # ПРОВЕРКА 1: сразу проверяем, авторизован ли клиент
+        # 1. Сразу проверяем авторизацию
         if await qr_data['client'].is_user_authorized():
             client = qr_data['client']
             session_string = client.session.save()
@@ -150,24 +150,27 @@ async def check_qr_login(user_id):
             user['qr_session'] = None
             return True, "✅ Вход по QR-коду успешен!"
         
-        # ПРОВЕРКА 2: пробуем получить результат через wait
-        result = await qr_data['qr_login'].wait()
-        if result is not None:
-            client = qr_data['client']
-            session_string = client.session.save()
-            user['client'] = client
-            user['session'] = session_string
-            user['qr_checked'] = True
-            
-            with open(f'session_string_{user_id}.txt', 'w') as f:
-                f.write(session_string)
-            
-            user['qr_session'] = None
-            return True, "✅ Вход по QR-коду успешен!"
-        else:
-            return False, "⏳ Ожидание сканирования..."
+        # 2. Пробуем получить результат через wait
+        try:
+            result = await qr_data['qr_login'].wait()
+            if result is not None:
+                client = qr_data['client']
+                session_string = client.session.save()
+                user['client'] = client
+                user['session'] = session_string
+                user['qr_checked'] = True
+                
+                with open(f'session_string_{user_id}.txt', 'w') as f:
+                    f.write(session_string)
+                
+                user['qr_session'] = None
+                return True, "✅ Вход по QR-коду успешен!"
+        except:
+            pass
+        
+        return False, "⏳ Ожидание сканирования..."
     except Exception as e:
-        # ПРОВЕРКА 3: при ошибке снова проверяем авторизацию
+        # 3. При ошибке - проверяем авторизацию
         try:
             if await qr_data['client'].is_user_authorized():
                 client = qr_data['client']
@@ -188,25 +191,49 @@ async def check_qr_login(user_id):
 async def check_qr_status(query, user_id):
     user = get_user_data(user_id)
     
-    # Проверяем 20 раз с интервалом 2 секунды (40 секунд)
+    # Проверяем 20 раз с интервалом 2 секунды
     for i in range(20):
         await asyncio.sleep(2)
         
-        # Проверяем авторизацию
+        # Проверка 1: через is_user_ready
         if user.get('client') and await is_user_ready(user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Проверяем статус QR
+        # Проверка 2: через check_qr_login
         success, msg = await check_qr_login(user_id)
         if success:
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Если сессия сохранена - вход выполнен
+        # Проверка 3: если есть сессия
         if user.get('session'):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
+        
+        # Проверка 4: пробуем создать клиент и проверить
+        try:
+            test_client = TelegramClient(
+                StringSession(),
+                API_ID, API_HASH,
+                device_model="Desktop",
+                system_version="Windows 10",
+                app_version="4.16.30"
+            )
+            await test_client.connect()
+            if await test_client.is_user_authorized():
+                session_string = test_client.session.save()
+                user['client'] = test_client
+                user['session'] = session_string
+                user['qr_checked'] = True
+                
+                with open(f'session_string_{user_id}.txt', 'w') as f:
+                    f.write(session_string)
+                
+                await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+                return
+        except:
+            pass
     
     # Последняя проверка
     if await is_user_ready(user_id):
