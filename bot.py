@@ -329,6 +329,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
     
+    # Сбрасываем счётчик
     user['subscription_attempts'] = 0
     
     if user['is_subscribed']:
@@ -343,37 +344,36 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
-    # ===== ПРОВЕРКА ПОДПИСКИ (СО ВТОРОГО НАЖАТИЯ) =====
+    # ===== ПРОВЕРКА ПОДПИСКИ (ПРОСТО ПО НАЖАТИЯМ) =====
     if query.data == 'check_subscription':
-        # Отвечаем на callback, чтобы убрать "загрузка"
-        await query.answer()
-        
-        # Увеличиваем счётчик нажатий
+        # Увеличиваем счётчик
         user['subscription_attempts'] += 1
         
-        # ПЕРВОЕ НАЖАТИЕ - показываем ошибку
+        # Первое нажатие
         if user['subscription_attempts'] == 1:
             keyboard = [
                 [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
-                [InlineKeyboardButton("✅ Проверить ещё раз", callback_data='check_subscription')],
+                [InlineKeyboardButton("✅ Я подписался, проверить", callback_data='check_subscription')],
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
+            # Отвечаем на callback и редактируем сообщение
+            await query.answer()
             await query.edit_message_text(
                 "❌ *Вы не подписаны на спонсора!*\n\n"
-                "1. Нажмите кнопку *'Подписаться'* ниже\n"
+                "1. Нажмите *'Подписаться'*\n"
                 "2. Подпишитесь на канал\n"
-                "3. Вернитесь и нажмите *'Проверить ещё раз'*\n\n"
-                "📌 *Совет:* После подписки нажмите кнопку ещё раз.",
+                "3. Вернитесь и нажмите *'Я подписался, проверить'*",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
             return
         
-        # ВТОРОЕ НАЖАТИЕ - пропускаем дальше
+        # Второе нажатие - пропускаем
         if user['subscription_attempts'] >= 2:
             user['is_subscribed'] = True
-            await query.edit_message_text("✅ Спасибо за подписку! Переходим в главное меню...")
+            await query.answer("✅ Доступ получен!")
+            await query.edit_message_text("✅ Спасибо! Переходим в главное меню...")
             await asyncio.sleep(1)
             await show_main_menu(update, context, is_callback=True)
             return
