@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import threading
 import time
@@ -29,7 +30,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b'Bot is running!')
     
     def log_message(self, format, *args):
-        pass  # Отключаем логи HTTP запросов
+        pass
 
 def run_webserver():
     port = int(os.environ.get('PORT', 8080))
@@ -39,7 +40,6 @@ def run_webserver():
 
 # ===== РАБОТА С КЛИЕНТАМИ =====
 def get_client(user_id):
-    """Создает или возвращает существующего клиента"""
     if user_id not in user_clients:
         client = TelegramClient(
             f'session_{user_id}', 
@@ -56,7 +56,6 @@ def get_client(user_id):
     return user_clients[user_id]
 
 async def is_user_ready(user_id):
-    """Проверяет, авторизован ли пользователь"""
     if user_id not in user_clients:
         return False
     
@@ -69,9 +68,50 @@ async def is_user_ready(user_id):
         print(f"Ошибка проверки авторизации: {e}")
         return False
 
+def format_phone_number(phone):
+    """Красиво форматирует номер телефона"""
+    digits = phone[1:] if phone.startswith('+') else phone
+    
+    # США/Канада
+    if digits.startswith('1') and len(digits) >= 11:
+        return f"+1 ({digits[1:4]}) {digits[4:7]}-{digits[7:11]}"
+    # Россия/Казахстан
+    elif digits.startswith('7') and len(digits) >= 11:
+        return f"+7 ({digits[1:4]}) {digits[4:7]}-{digits[7:9]}-{digits[9:11]}"
+    # Великобритания
+    elif digits.startswith('44') and len(digits) >= 12:
+        return f"+44 {digits[2:5]} {digits[5:9]} {digits[9:12]}"
+    # Украина
+    elif digits.startswith('380') and len(digits) >= 12:
+        return f"+380 ({digits[3:5]}) {digits[5:8]}-{digits[8:10]}-{digits[10:12]}"
+    # Германия
+    elif digits.startswith('49') and len(digits) >= 11:
+        return f"+49 {digits[2:5]} {digits[5:8]} {digits[8:]}"
+    # Франция
+    elif digits.startswith('33') and len(digits) >= 11:
+        return f"+33 {digits[2]} {digits[3:5]} {digits[5:7]} {digits[7:9]} {digits[9:]}"
+    # Китай
+    elif digits.startswith('86') and len(digits) >= 13:
+        return f"+86 {digits[2:5]} {digits[5:8]} {digits[8:11]} {digits[11:]}"
+    # Индия
+    elif digits.startswith('91') and len(digits) >= 12:
+        return f"+91 {digits[2:5]} {digits[5:8]} {digits[8:]}"
+    # Япония
+    elif digits.startswith('81') and len(digits) >= 12:
+        return f"+81 {digits[2:4]} {digits[4:8]} {digits[8:]}"
+    
+    # Универсальное форматирование
+    if len(digits) > 6:
+        formatted = '+' + digits[:2]
+        for i in range(2, len(digits), 3):
+            formatted += ' ' + digits[i:i+3]
+        return formatted
+    
+    return '+' + digits
+
 # ===== ЛОГИН ПО КОДУ =====
 async def send_code(user_id, phone):
-    """Отправляет код подтверждения на номер телефона"""
+    """Отправляет код подтверждения на номер телефона (любой формат)"""
     
     # Проверка блокировки
     if user_id in flood_wait_tracker:
@@ -87,6 +127,41 @@ async def send_code(user_id, phone):
             del flood_wait_tracker[user_id]
     
     try:
+        # Очистка номера от пробелов, скобок, тире и других символов
+        phone_clean = phone.strip()
+        phone_clean = re.sub(r'[\s\-\(\)\.]', '', phone_clean)
+        
+        # Проверяем, что номер начинается с +
+        if not phone_clean.startswith('+'):
+            if phone_clean.startswith('8') and len(phone_clean) == 11:
+                phone_clean = '+7' + phone_clean[1:]
+            elif phone_clean.startswith('7') and len(phone_clean) == 11:
+                phone_clean = '+' + phone_clean
+            else:
+                return False, (
+                    "❌ Номер должен начинаться с '+' и кода страны.\n\n"
+                    "Примеры правильных форматов:\n"
+                    "• +1 555 123 4567 (США)\n"
+                    "• +44 20 1234 5678 (Великобритания)\n"
+                    "• +7 999 888 77 66 (Россия)\n"
+                    "• +380 50 123 4567 (Украина)\n"
+                    "• +49 151 12345678 (Германия)\n\n"
+                    "Отправьте номер в международном формате."
+                )
+        
+        # Проверяем, что после + идут только цифры
+        if not re.match(r'^\+\d+$', phone_clean):
+            return False, "❌ Номер должен содержать только '+' и цифры. Пробелы и скобки не нужны."
+        
+        # Проверяем длину номера
+        digits = phone_clean[1:]
+        if len(digits) < 8 or len(digits) > 15:
+            return False, (
+                "❌ Некорректная длина номера.\n"
+                "Номер должен содержать от 8 до 15 цифр (без учёта +).\n\n"
+                f"Вы ввели: {phone_clean} ({len(digits)} цифр)"
+            )
+        
         client = get_client(user_id)
         
         # Очищаем старое соединение
@@ -99,21 +174,26 @@ async def send_code(user_id, phone):
         await asyncio.sleep(1)
         
         # Отправляем запрос кода
-        result = await client.send_code_request(phone)
+        result = await client.send_code_request(phone_clean)
         
         login_states[user_id] = {
             'step': 'code',
-            'phone': phone,
+            'phone': phone_clean,
             'hash': result.phone_code_hash,
             'attempts': 0
         }
-        return True, "✅ Код подтверждения отправлен в Telegram!\n\nПроверьте приложение Telegram на телефоне и введите код цифрами."
+        
+        phone_display = format_phone_number(phone_clean)
+        
+        return True, (
+            f"✅ Код подтверждения отправлен в Telegram!\n"
+            f"📱 Номер: {phone_display}\n\n"
+            f"Проверьте приложение Telegram на телефоне и введите код цифрами."
+        )
     
     except errors.FloodWaitError as e:
-        # Сохраняем время разблокировки
         flood_wait_tracker[user_id] = time.time() + e.seconds
         
-        # Удаляем сессию и клиент
         if user_id in user_clients:
             try:
                 await user_clients[user_id].disconnect()
@@ -121,7 +201,6 @@ async def send_code(user_id, phone):
                 pass
             del user_clients[user_id]
         
-        # Удаляем файл сессии
         session_file = f'session_{user_id}.session'
         if os.path.exists(session_file):
             try:
@@ -138,14 +217,25 @@ async def send_code(user_id, phone):
             return False, f"🚫 Telegram заблокировал этот номер на {minutes}мин!\nПопробуйте позже."
     
     except errors.PhoneNumberInvalidError:
-        return False, "❌ Неверный формат номера. Используйте международный формат: +79998887766"
+        return False, (
+            "❌ Неверный формат номера.\n\n"
+            "Убедитесь, что:\n"
+            "• Номер начинается с + и кода страны\n"
+            "• Номер зарегистрирован в Telegram\n"
+            "• Вы правильно ввели все цифры\n\n"
+            "Пример: +1 555 123 4567"
+        )
     
     except errors.PhoneNumberBannedError:
-        return False, "❌ Этот номер заблокирован в Telegram"
+        return False, "❌ Этот номер заблокирован в Telegram. Используйте другой номер."
     
     except Exception as e:
         error_str = str(e)
-        return False, f"❌ Ошибка: {error_str[:150]}\nПроверьте номер и попробуйте позже."
+        return False, (
+            f"❌ Ошибка при отправке кода.\n"
+            f"Детали: {error_str[:150]}\n\n"
+            f"Проверьте номер и попробуйте позже."
+        )
 
 async def verify_code(user_id, code):
     """Проверяет код подтверждения"""
@@ -161,18 +251,14 @@ async def verify_code(user_id, code):
     client = user_clients[user_id]
     
     try:
-        # Проверяем соединение
         if not client.is_connected():
             await client.connect()
             await asyncio.sleep(1)
         
-        # Пробуем войти
         await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
         
-        # Очищаем состояние логина
         del login_states[user_id]
         
-        # Инициализируем хранилища
         if user_id not in user_groups:
             user_groups[user_id] = []
         if user_id not in user_messages:
@@ -183,7 +269,6 @@ async def verify_code(user_id, code):
         return True, "✅ Аккаунт авторизован!\n\nИспользуйте:\n• /add_group @username\n• /set_msg текст\n• /start_spam"
     
     except errors.PhoneCodeExpiredError:
-        # Код истек - отправляем новый
         try:
             new_result = await client.send_code_request(data['phone'])
             login_states[user_id]['hash'] = new_result.phone_code_hash
@@ -205,7 +290,6 @@ async def verify_code(user_id, code):
 
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главное меню"""
     keyboard = [
         [InlineKeyboardButton("🔑 Войти в аккаунт", callback_data='login')],
         [InlineKeyboardButton("➕ Добавить группу", callback_data='add_group')],
@@ -219,6 +303,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "🤖 *БОТ ДЛЯ РАССЫЛКИ В TELEGRAM*\n\n"
+        "📱 *Поддерживает номера всех стран!*\n"
+        "🇺🇸 США | 🇬🇧 Великобритания | 🇩🇪 Германия\n"
+        "🇷🇺 Россия | 🇺🇦 Украина | 🇨🇳 Китай и другие\n\n"
         "⚠️ *Важно:* Не пытайтесь входить слишком часто!\n"
         "При блокировке ждите указанное время.\n\n"
         "Все команды доступны по кнопкам ниже ↓",
@@ -227,13 +314,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     
     if query.data == 'login':
-        # Проверка блокировки
         if user_id in flood_wait_tracker:
             remaining = int(flood_wait_tracker[user_id] - time.time())
             if remaining > 0:
@@ -245,17 +330,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await query.edit_message_text(f"🚫 Вход заблокирован на {minutes}мин")
                 return
         
-        # Проверка текущей авторизации
         ready = await is_user_ready(user_id)
         if ready:
             await query.edit_message_text("✅ Вы уже авторизованы!")
             return
         
-        # Начинаем процесс логина
         login_states[user_id] = {'step': 'phone'}
         await query.edit_message_text(
-            "📱 Введите номер телефона в международном формате:\n\n"
-            "`+79998887766`\n\n"
+            "📱 *Введите номер телефона в международном формате:*\n\n"
+            "Можно вводить с пробелами или без:\n"
+            "• `+1 707 403 8573`\n"
+            "• `+17074038573`\n"
+            "• `+44 20 1234 5678`\n"
+            "• `+7 999 888 77 66`\n\n"
             "⚠️ Будьте внимательны! При ошибке блокировка на 24 часа!",
             parse_mode='Markdown'
         )
@@ -318,7 +405,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    """Запускает процесс рассылки"""
     if is_callback:
         query = update.callback_query
         user_id = query.from_user.id
@@ -327,7 +413,6 @@ async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE,
         user_id = update.effective_user.id
         reply_func = update.message.reply_text
     
-    # Проверки
     ready = await is_user_ready(user_id)
     if not ready:
         await reply_func("❌ Сначала авторизуйтесь: нажмите 'Войти' или /login")
@@ -345,7 +430,6 @@ async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await reply_func("⚠️ Рассылка уже запущена!")
         return
     
-    # Запускаем рассылку
     user_spamming[user_id] = True
     client = user_clients[user_id]
     groups = user_groups[user_id].copy()
@@ -408,7 +492,6 @@ async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except:
                 pass
         
-        # Задержка между отправками
         await asyncio.sleep(3)
     
     user_spamming[user_id] = False
@@ -425,11 +508,9 @@ async def start_spam_process(update: Update, context: ContextTypes.DEFAULT_TYPE,
             pass
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений"""
     user_id = update.effective_user.id
     text = update.message.text.strip()
     
-    # Обработка состояний логина
     if user_id in login_states:
         step = login_states[user_id]['step']
         
@@ -447,7 +528,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         return
     
-    # Обработка команд
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -482,7 +562,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif text == '/login':
-        # Проверка блокировки
         if user_id in flood_wait_tracker:
             remaining = int(flood_wait_tracker[user_id] - time.time())
             if remaining > 0:
@@ -494,18 +573,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(f"🚫 Вход заблокирован на {minutes}мин")
                 return
         
-        # Проверка текущей авторизации
         ready = await is_user_ready(user_id)
         if ready:
             await update.message.reply_text("✅ Вы уже авторизованы!")
             return
         
-        # Начинаем процесс логина
         login_states[user_id] = {'step': 'phone'}
         await update.message.reply_text(
-            "📱 Введите номер телефона в международном формате:\n"
-            "+79998887766\n\n"
-            "⚠️ Будьте внимательны! При ошибке блокировка на 24 часа!"
+            "📱 *Введите номер телефона в международном формате:*\n\n"
+            "Можно вводить с пробелами или без:\n"
+            "• `+1 707 403 8573`\n"
+            "• `+17074038573`\n"
+            "• `+44 20 1234 5678`\n"
+            "• `+7 999 888 77 66`\n\n"
+            "⚠️ Будьте внимательны! При ошибке блокировка на 24 часа!",
+            parse_mode='Markdown'
         )
     
     elif text == '/status':
@@ -561,6 +643,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/status - Проверить статус\n"
             "/groups - Список групп\n"
             "/help - Помощь\n\n"
+            "🌍 *Поддерживаются номера всех стран!*\n\n"
             "⚠️ *Важно:* Не пытайтесь входить слишком часто!",
             parse_mode='Markdown'
         )
@@ -575,7 +658,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
-    """Точка входа"""
     # Очистка старых сессий при запуске
     for file in os.listdir('.'):
         if file.startswith('session_') and file.endswith('.session'):
@@ -595,12 +677,12 @@ def main():
     
     # Регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", lambda u, c: handle_message(u, c)))
     app.add_handler(CommandHandler("login", handle_message))
     app.add_handler(CommandHandler("status", handle_message))
     app.add_handler(CommandHandler("groups", handle_message))
     app.add_handler(CommandHandler("start_spam", handle_message))
     app.add_handler(CommandHandler("stop_spam", handle_message))
+    app.add_handler(CommandHandler("help", handle_message))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
