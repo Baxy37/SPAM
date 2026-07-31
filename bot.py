@@ -131,6 +131,7 @@ async def generate_qr_code(user_id):
         return False, None, str(e)
 
 async def check_qr_login(user_id):
+    """Проверяет статус QR-входа"""
     user = get_user_data(user_id)
     qr_data = user.get('qr_session')
     if not qr_data:
@@ -153,7 +154,54 @@ async def check_qr_login(user_id):
         else:
             return False, "⏳ Ожидание сканирования..."
     except Exception as e:
+        # Если ошибка - проверяем, может вход уже выполнен
+        try:
+            if await user['qr_session']['client'].is_user_authorized():
+                client = user['qr_session']['client']
+                session_string = client.session.save()
+                user['client'] = client
+                user['session'] = session_string
+                user['qr_checked'] = True
+                
+                with open(f'session_string_{user_id}.txt', 'w') as f:
+                    f.write(session_string)
+                
+                user['qr_session'] = None
+                return True, "✅ Вход по QR-коду успешен!"
+        except:
+            pass
         return False, f"❌ Ошибка: {str(e)}"
+
+async def check_qr_status(query, user_id):
+    """Проверяет статус QR-входа с улучшенной логикой"""
+    user = get_user_data(user_id)
+    
+    # Проверяем 10 раз с интервалом 3 секунды (30 секунд)
+    for i in range(10):
+        await asyncio.sleep(3)
+        
+        # Сначала проверяем, не авторизован ли уже пользователь
+        if user.get('client') and await is_user_ready(user_id):
+            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+            return
+        
+        # Проверяем статус QR
+        success, msg = await check_qr_login(user_id)
+        if success:
+            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+            return
+        
+        # Если видим, что сессия сохранена - значит вход выполнен
+        if user.get('session'):
+            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+            return
+    
+    # Если не удалось - проверяем последний раз через is_user_ready
+    if await is_user_ready(user_id):
+        await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
+        return
+    
+    await query.message.reply_text("⏰ QR-код истек. Попробуйте снова.")
 
 async def get_qr_instructions():
     return """
@@ -470,23 +518,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups])
         await send_with_photo(query, text, is_callback=True)
-
-async def check_qr_status(query, user_id):
-    user = get_user_data(user_id)
-    
-    for i in range(20):
-        await asyncio.sleep(3)
-        
-        if user.get('qr_checked'):
-            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-            return
-        
-        success, msg = await check_qr_login(user_id)
-        if success:
-            await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
-            return
-    
-    await query.message.reply_text("⏰ QR-код истек. Попробуйте снова.")
 
 # ===== ЗАПУСК РАССЫЛКИ =====
 async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
