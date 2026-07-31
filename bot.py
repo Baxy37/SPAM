@@ -23,6 +23,7 @@ SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 
 # Хранилище пользователей
 user_data = {}
+user_string_sessions = {}
 
 # ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
@@ -220,6 +221,7 @@ async def verify_code_phone(user_id, code):
 
 # ===== ОТПРАВКА С ПОДПИСЬЮ =====
 async def send_message_with_signature(client, chat_id, message):
+    """Отправляет сообщение с подписью - ссылкой на бота"""
     signed_message = f"{message}\n\n—\n📨 Отправлено через [🤖 Бот]({BOT_LINK})"
     try:
         await client.send_message(chat_id, signed_message, parse_mode='Markdown')
@@ -233,7 +235,7 @@ async def send_message_with_signature(client, chat_id, message):
             return False
 
 # ===== ГЛАВНОЕ МЕНЮ =====
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
+async def show_main_menu(update, context, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📱 Вход по QR", callback_data='qr_login')],
         [InlineKeyboardButton("📱 Инструкция QR", callback_data='qr_help')],
@@ -287,7 +289,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, is_
                 reply_markup=reply_markup
             )
 
-async def show_subscription_required(update: Update, is_callback=False):
+async def show_subscription_required(update, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на спонсора", url=SPONSOR_LINK)],
         [InlineKeyboardButton("✅ Проверить подписку", callback_data='check_subscription')],
@@ -339,7 +341,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user_data(user_id)
     
-    # Проверяем подписку
+    # Если уже есть клиент - проверяем подписку
     if user['client'] and await is_user_ready(user_id):
         is_subscribed = await check_subscription_status(user['client'], user_id)
         if is_subscribed:
@@ -356,7 +358,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     user = get_user_data(user_id)
     
-    # ПРОВЕРКА ПОДПИСКИ
+    # ===== ПРОВЕРКА ПОДПИСКИ =====
     if query.data == 'check_subscription':
         if not user['client'] or not await is_user_ready(user_id):
             await query.edit_message_text("⚠️ Сначала авторизуйтесь в аккаунте Telegram.")
@@ -383,13 +385,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
     
-    # ПРОВЕРКА ПОДПИСКИ ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ
+    # ===== ПРОВЕРКА ПОДПИСКИ ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ =====
     if not user['is_subscribed']:
         await query.edit_message_text("⚠️ Для использования бота подпишитесь на спонсора.")
         await show_subscription_required(update, is_callback=True)
         return
     
-    # ОСТАЛЬНЫЕ ОБРАБОТЧИКИ
+    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
     if query.data == 'qr_help':
         msg = await get_qr_instructions()
         await query.edit_message_text(msg, parse_mode='Markdown')
@@ -413,6 +415,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "📱 Введите номер телефона:\n"
             "Пример: `+998901234567`\n\n"
+            "Код придет в Telegram\n\n"
             "⚠️ *Если вход по номеру не работает, используйте QR-код*",
             parse_mode='Markdown'
         )
@@ -507,6 +510,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     msg = user['message']
     
     await reply(f"🚀 Начинаю рассылку в {len(groups)} групп...")
+    await reply(f"📨 В конце каждого сообщения будет подпись: [🤖 Бот]({BOT_LINK})", parse_mode='Markdown')
     
     sent = 0
     errors = 0
@@ -525,7 +529,9 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
             if i % 5 == 0:
                 await reply(f"✅ {i}/{len(groups)} отправлено")
         except errors.FloodWaitError as e:
-            await asyncio.sleep(e.seconds + 2)
+            wait_time = e.seconds + 2
+            await reply(f"⏳ Ожидание {wait_time} сек (флуд)...")
+            await asyncio.sleep(wait_time)
             success = await send_message_with_signature(client, group, msg)
             if success:
                 sent += 1
@@ -544,6 +550,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     user = get_user_data(user_id)
+    
+    # Проверка подписки для команд
+    if not user['is_subscribed'] and text not in ['/start', '/help']:
+        await update.message.reply_text("⚠️ Для использования бота подпишитесь на спонсора. Используйте /start")
+        return
     
     # Логин по номеру
     if user.get('login_state'):
@@ -694,7 +705,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен с проверкой подписки!")
     print(f"🔗 Подпись: {BOT_LINK}")
     app.run_polling()
 
