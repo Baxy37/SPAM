@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
-# Устанавливаем утилиту для синхронизации времени
-RUN apt-get update && apt-get install -y ntpdate && apt-get clean
+# Устанавливаем утилиту для синхронизации времени (новая версия)
+RUN apt-get update && apt-get install -y ntpsec-ntpdate && apt-get clean
 
 # Синхронизируем время при сборке
 RUN ntpdate pool.ntp.org
