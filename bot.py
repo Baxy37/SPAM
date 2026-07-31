@@ -2,7 +2,6 @@ import os
 import asyncio
 import threading
 import ntplib
-import time
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
@@ -21,26 +20,15 @@ user_messages = {}
 user_spamming = {}
 login_states = {}
 
-# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ (без прав администратора) =====
+# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ =====
 def sync_time():
-    """Синхронизирует время через NTP (не требует прав root)"""
     try:
         client = ntplib.NTPClient()
         response = client.request('pool.ntp.org', version=3)
-        # Просто выводим точное время — это помогает Telethon
-        # Telethon использует системное время, но если мы его не меняем,
-        # то хотя бы знаем расхождение
         ntp_time = datetime.fromtimestamp(response.tx_time, tz=timezone.utc)
         local_time = datetime.now(timezone.utc)
         diff = (ntp_time - local_time).total_seconds()
-        print(f"🕐 NTP время: {ntp_time.strftime('%H:%M:%S')}")
-        print(f"🕐 Локальное время: {local_time.strftime('%H:%M:%S')}")
-        print(f"📊 Расхождение: {diff:.2f} секунд")
-        
-        # Если расхождение больше 2 секунд — Telethon может не работать
-        if abs(diff) > 2:
-            print("⚠️ ВНИМАНИЕ: Большое расхождение времени!")
-            print("💡 Рекомендуем переключиться на вход по QR-коду (/qr)")
+        print(f"🕐 NTP: {ntp_time.strftime('%H:%M:%S')} | Локальное: {local_time.strftime('%H:%M:%S')} | Расхождение: {diff:.2f}с")
         return diff
     except Exception as e:
         print(f"⚠️ Ошибка синхронизации: {e}")
@@ -73,7 +61,7 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН =====
+# ===== ЛОГИН ПО КОДУ =====
 async def start_login(user_id, phone):
     try:
         client = get_client(user_id)
@@ -112,13 +100,33 @@ async def complete_login(user_id, code):
     except Exception as e:
         return False, str(e)
 
+# ===== QR-ВХОД (универсальный для всех версий) =====
+async def qr_login(user_id):
+    client = get_client(user_id)
+    await client.connect()
+    
+    # Получаем QR-объект
+    qr = await client.qr_login()
+    
+    # Получаем QR-код (для старых версий Telethon)
+    try:
+        # Новый способ
+        img = await qr.qr_code()
+    except AttributeError:
+        # Старый способ — сохраняем через bytes
+        qr_bytes = qr.qr_code_bytes
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(qr_bytes))
+    
+    return qr, img
+
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     await update.message.reply_text(
-        f"🤖 Бот для рассылки\n\n"
+        "🤖 Бот для рассылки\n\n"
         "🔑 /login — войти по номеру и коду\n"
-        "📱 /qr — войти по QR-коду (рекомендуется, если код не работает)\n"
+        "📱 /qr — войти по QR-коду\n"
         "➕ /add_group @chat — добавить группу\n"
         "📝 /set_msg Текст — установить сообщение\n"
         "🚀 /start_spam — запустить рассылку\n"
@@ -176,7 +184,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ {error}\nПопробуйте /login заново")
                 del login_states[user_id]
 
-# ===== QR-ВХОД (на случай, если код не работает) =====
 async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -188,11 +195,9 @@ async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Генерирую QR-код...")
     
     try:
-        client = get_client(user_id)
-        await client.connect()
-        qr_login_obj = await client.qr_login()
+        qr_login_obj, img = await qr_login(user_id)
         
-        img = await qr_login_obj.qr_code()
+        # Сохраняем и отправляем
         img_path = f'qr_{user_id}.png'
         img.save(img_path)
         
@@ -212,6 +217,7 @@ async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         os.remove(img_path)
         
+        # Ждем сканирования
         try:
             await qr_login_obj.wait(60)
             await update.message.reply_text("✅ Аккаунт успешно авторизован! 🎉")
@@ -345,8 +351,7 @@ def main():
     app.add_handler(CommandHandler("groups", groups_list))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен!")
-    print("💡 Если код не работает — используйте /qr для входа по QR-коду.")
+    print("✅ Бот запущен! Используйте /login или /qr.")
     app.run_polling()
 
 if __name__ == "__main__":
