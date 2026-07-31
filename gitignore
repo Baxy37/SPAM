@@ -1,8 +1,6 @@
-*.session
-*.session-journal
-session_string_*.txt
 __pycache__/
-*.py[cod]
+*.pyc
 .env
-venv/
-env/
+session_string_*.txt
+M.png
+*.log
