@@ -95,10 +95,10 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД (ПОЛНОСТЬЮ РАБОЧАЯ ЛОГИКА) =====
+# ===== QR-КОД (РАБОЧАЯ ВЕРСИЯ) =====
 async def generate_qr_code(user_id):
     try:
-        # Создаем новый клиент для QR-входа
+        # Создаем клиент для QR-входа
         client = TelegramClient(
             StringSession(),
             API_ID, API_HASH,
@@ -135,14 +135,12 @@ async def generate_qr_code(user_id):
         return False, None, str(e)
 
 async def check_qr_login(user_id):
-    """Проверяет статус QR-входа"""
     user = get_user_data(user_id)
     qr_data = user.get('qr_session')
     if not qr_data:
         return False, "QR-сессия не найдена"
     
     try:
-        # Пробуем получить результат
         result = await qr_data['qr_login'].wait()
         if result is not None:
             client = qr_data['client']
@@ -159,7 +157,6 @@ async def check_qr_login(user_id):
         else:
             return False, "⏳ Ожидание сканирования..."
     except Exception as e:
-        # Если ошибка - проверяем, может вход уже выполнен
         try:
             if await user['qr_session']['client'].is_user_authorized():
                 client = user['qr_session']['client']
@@ -178,29 +175,24 @@ async def check_qr_login(user_id):
         return False, f"❌ Ошибка: {str(e)}"
 
 async def check_qr_status(query, user_id):
-    """Проверяет статус QR-входа каждые 3 секунды"""
     user = get_user_data(user_id)
     
     for i in range(10):
         await asyncio.sleep(3)
         
-        # Проверяем, не авторизован ли уже пользователь
         if user.get('client') and await is_user_ready(user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Проверяем статус QR
         success, msg = await check_qr_login(user_id)
         if success:
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Если видим, что сессия сохранена - значит вход выполнен
         if user.get('session'):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
     
-    # Если не удалось - проверяем последний раз через is_user_ready
     if await is_user_ready(user_id):
         await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
         return
@@ -432,13 +424,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'qr_login':
         success, img_bytes, url = await generate_qr_code(user_id)
         if success:
+            # Сначала редактируем сообщение с инструкцией
             await query.edit_message_text(
                 "📱 *Сканируй QR-код*\n\n"
                 "Telegram → Настройки → Устройства → Добавить устройство\n\n"
                 "⏳ Действует: 60 секунд",
                 parse_mode='Markdown'
             )
-            await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
+            # Затем отправляем QR-код как отдельное фото
+            await query.message.reply_photo(
+                photo=img_bytes,
+                caption="📸 Отсканируй QR-код для входа"
+            )
+            # Запускаем проверку статуса
             asyncio.create_task(check_qr_status(query, user_id))
         else:
             await query.edit_message_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
@@ -722,7 +720,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
-    # Загружаем сохраненные сессии
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
@@ -751,7 +748,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен с QR-входом!")
     print(f"🔗 Подпись: {BOT_LINK}")
     if os.path.exists(PHOTO_PATH):
         print(f"📷 Фото {PHOTO_PATH} будет отправлено с главным меню")
