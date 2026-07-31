@@ -1,38 +1,22 @@
 import os
 import asyncio
 import threading
-import ntplib
-from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, errors
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ===== КОНФИГ (ТВОИ ДАННЫЕ) =====
+# ===== КОНФИГ =====
 API_ID = 36474738
 API_HASH = '4dd8134517fc74300fe610a4d385eaa5'
 BOT_TOKEN = '8868463698:AAE2C7pPOdyk7ouT64w_O3LMW-BScIqQSCg'
 
-# Хранилище пользователей
+# Хранилище
 user_clients = {}
 user_groups = {}
 user_messages = {}
 user_spamming = {}
 login_states = {}
-
-# ===== СИНХРОНИЗАЦИЯ ВРЕМЕНИ (просто лог, не меняет систему) =====
-def sync_time():
-    try:
-        client = ntplib.NTPClient()
-        response = client.request('pool.ntp.org', version=3)
-        ntp_time = datetime.fromtimestamp(response.tx_time, tz=timezone.utc)
-        local_time = datetime.now(timezone.utc)
-        diff = (ntp_time - local_time).total_seconds()
-        print(f"🕐 NTP: {ntp_time.strftime('%H:%M:%S')} | Локальное: {local_time.strftime('%H:%M:%S')} | Расхождение: {diff:.2f}с")
-        return diff
-    except Exception as e:
-        print(f"⚠️ Ошибка синхронизации: {e}")
-        return None
 
 # ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 class HealthHandler(BaseHTTPRequestHandler):
@@ -61,20 +45,34 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== QR-ВХОД (НОВАЯ ВЕРСИЯ ДЛЯ TELEGRAM) =====
-async def qr_login(user_id):
-    client = get_client(user_id)
-    await client.connect()
-    qr = await client.qr_login()
-    img = await qr.qr_code()  # для Telethon 1.36+
-    return qr, img
+# ===== ЛОГИН ТОЛЬКО ПО ПАРОЛЮ (БЕЗ КОДА) =====
+async def login_with_password(user_id, phone, password):
+    try:
+        client = get_client(user_id)
+        await client.connect()
+        
+        # Отправляем запрос на получение кода (это необходимо для инициализации)
+        # Но мы его игнорируем и сразу вводим пароль
+        try:
+            await client.send_code_request(phone)
+        except:
+            pass  # Игнорируем ошибки кода
+        
+        # Пробуем войти по паролю
+        await client.sign_in(password=password)
+        return True, None
+    except errors.PasswordHashInvalidError:
+        return False, "❌ Неверный пароль. Проверьте раскладку и попробуйте еще раз."
+    except errors.SessionPasswordNeededError:
+        return False, "❌ У вас не включен облачный пароль. Включите в настройках Telegram."
+    except Exception as e:
+        return False, f"❌ Ошибка: {str(e)}"
 
 # ===== КОМАНДЫ БОТА =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 **Бот для рассылки**\n\n"
-        "🔑 `/login` — войти по номеру и коду (может не работать)\n"
-        "📱 `/qr` — войти по QR-коду **(РЕКОМЕНДУЮ)**\n"
+        "🔑 `/login` — войти по номеру и **облачному паролю**\n"
         "➕ `/add_group @chat` — добавить группу\n"
         "📝 `/set_msg Текст` — установить сообщение\n"
         "🚀 `/start_spam` — запустить рассылку\n"
@@ -91,7 +89,6 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Вы уже авторизованы!")
         return
     
-    sync_time()
     login_states[user_id] = {'step': 'phone'}
     await update.message.reply_text(
         "📱 Введите номер телефона в формате:\n"
@@ -109,87 +106,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = login_states[user_id]['step']
     
     if step == 'phone':
-        try:
-            client = get_client(user_id)
-            await client.connect()
-            result = await client.send_code_request(text)
-            login_states[user_id] = {
-                'step': 'code',
-                'phone': text,
-                'hash': result.phone_code_hash
-            }
-            await update.message.reply_text("✅ Код отправлен в Telegram!\nВведите код цифрами:")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {str(e)}\nПопробуйте /login заново")
-            del login_states[user_id]
+        # Сохраняем номер и просим пароль
+        login_states[user_id]['phone'] = text
+        login_states[user_id]['step'] = 'password'
+        await update.message.reply_text(
+            "🔐 **Введите ваш облачный пароль (2FA)**\n\n"
+            "Код из СМС не нужен. Только пароль, который вы установили в настройках Telegram.\n"
+            "Если у вас нет облачного пароля — включите его: Настройки → Конфиденциальность → Облачный пароль."
+        )
     
-    elif step == 'code':
-        data = login_states[user_id]
-        client = get_client(user_id)
-        try:
-            await client.sign_in(data['phone'], text, phone_code_hash=data['hash'])
+    elif step == 'password':
+        phone = login_states[user_id]['phone']
+        password = text
+        
+        # Пробуем войти по паролю
+        success, error = await login_with_password(user_id, phone, password)
+        
+        if success:
+            await update.message.reply_text("✅ Аккаунт успешно авторизован по облачному паролю! 🎉")
             del login_states[user_id]
-            await update.message.reply_text("✅ Аккаунт авторизован! Можно работать.")
             if user_id not in user_groups:
                 user_groups[user_id] = []
             if user_id not in user_messages:
                 user_messages[user_id] = ""
             if user_id not in user_spamming:
                 user_spamming[user_id] = False
-        except errors.PhoneCodeExpiredError:
-            await update.message.reply_text("⏰ Код истек. Попробуйте /login заново или используйте /qr")
-            del login_states[user_id]
-        except errors.PhoneCodeInvalidError:
-            await update.message.reply_text("❌ Неверный код. Попробуйте еще раз.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Ошибка: {str(e)}\nПопробуйте /login заново")
-            del login_states[user_id]
-
-async def qr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    ready = await is_user_ready(user_id)
-    if ready:
-        await update.message.reply_text("✅ Вы уже авторизованы!")
-        return
-    
-    await update.message.reply_text("⏳ Генерирую QR-код...")
-    
-    try:
-        qr_login_obj, img = await qr_login(user_id)
-        img_path = f'qr_{user_id}.png'
-        img.save(img_path)
-        
-        with open(img_path, 'rb') as f:
-            await update.message.reply_photo(
-                photo=f,
-                caption=(
-                    "📸 **Отсканируйте QR-код**\n\n"
-                    "1️⃣ Откройте Telegram на телефоне\n"
-                    "2️⃣ Настройки → Устройства → Сканировать QR\n"
-                    "3️⃣ Наведите на этот код\n"
-                    "4️⃣ Нажмите 'Подтвердить'\n\n"
-                    "⏳ Код действует 60 секунд."
-                ),
-                parse_mode='Markdown'
-            )
-        
-        os.remove(img_path)
-        
-        try:
-            await qr_login_obj.wait(60)
-            await update.message.reply_text("✅ Аккаунт успешно авторизован! 🎉")
-            if user_id not in user_groups:
-                user_groups[user_id] = []
-            if user_id not in user_messages:
-                user_messages[user_id] = ""
-            if user_id not in user_spamming:
-                user_spamming[user_id] = False
-        except asyncio.TimeoutError:
-            await update.message.reply_text("⏰ Время истекло. Попробуйте /qr заново.")
-            
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {str(e)}\nПопробуйте /login.")
+        else:
+            await update.message.reply_text(error)
 
 # ===== ОСТАЛЬНЫЕ КОМАНДЫ =====
 async def add_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -231,7 +174,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ready = await is_user_ready(user_id)
     
     if not ready:
-        await update.message.reply_text("❌ Сначала авторизуйтесь: /qr")
+        await update.message.reply_text("❌ Сначала авторизуйтесь: /login")
         return
     if user_id not in user_messages or not user_messages[user_id]:
         await update.message.reply_text("❌ Сначала установите сообщение: /set_msg")
@@ -293,13 +236,11 @@ async def groups_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== ЗАПУСК =====
 def main():
-    sync_time()
     threading.Thread(target=run_webserver, daemon=True).start()
     
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", login))
-    app.add_handler(CommandHandler("qr", qr))
     app.add_handler(CommandHandler("add_group", add_group))
     app.add_handler(CommandHandler("add_groups", add_groups))
     app.add_handler(CommandHandler("set_msg", set_msg))
@@ -309,7 +250,7 @@ def main():
     app.add_handler(CommandHandler("groups", groups_list))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен! Используйте /qr для входа.")
+    print("✅ Бот запущен! Вход ТОЛЬКО по облачному паролю.")
     app.run_polling()
 
 if __name__ == "__main__":
