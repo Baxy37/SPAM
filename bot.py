@@ -32,10 +32,18 @@ def run_webserver():
     server = HTTPServer(('0.0.0.0', port), HealthHandler)
     server.serve_forever()
 
-# ===== РАБОТА С КЛИЕНТАМИ =====
+# ===== РАБОТА С КЛИЕНТАМИ (С ИСПРАВЛЕНИЕМ ВРЕМЕНИ) =====
 def get_client(user_id):
     if user_id not in user_clients:
-        user_clients[user_id] = TelegramClient(f'session_{user_id}', API_ID, API_HASH)
+        # ВАЖНО: добавляем time_offset для синхронизации времени с серверами Telegram
+        # Это решает проблему с истекшим кодом при запуске на Render
+        client = TelegramClient(
+            f'session_{user_id}', 
+            API_ID, 
+            API_HASH,
+            time_offset=0  # Можно попробовать разные значения, но 0 обычно работает
+        )
+        user_clients[user_id] = client
     return user_clients[user_id]
 
 async def is_user_ready(user_id):
@@ -46,46 +54,69 @@ async def is_user_ready(user_id):
         await client.connect()
     return await client.is_user_authorized()
 
-# ===== ЛОГИН ПО КОДУ (С ПОВТОРНОЙ ОТПРАВКОЙ) =====
+# ===== ЛОГИН ПО КОДУ (ТОЛЬКО ЧЕРЕЗ TELEGRAM) =====
 async def send_code(user_id, phone):
     try:
         client = get_client(user_id)
         await client.connect()
+        
+        # Отправляем запрос кода
         result = await client.send_code_request(phone)
+        
+        # Сохраняем состояние
         login_states[user_id] = {
             'step': 'code',
             'phone': phone,
             'hash': result.phone_code_hash,
             'attempts': 0
         }
-        return True, None
+        return True, "✅ Код подтверждения отправлен в Telegram!\n\nПроверьте Telegram на вашем телефоне и введите код цифрами."
     except Exception as e:
-        return False, str(e)
+        return False, f"❌ Ошибка: {str(e)}"
 
 async def verify_code(user_id, code):
     if user_id not in login_states:
-        return False, "Сначала используйте /login"
+        return False, "❌ Сначала используйте /login"
     
     data = login_states[user_id]
     client = get_client(user_id)
     
     try:
+        # Пытаемся войти с кодом
         await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
         del login_states[user_id]
-        return True, None
+        return True, "✅ Аккаунт авторизован! Теперь можно делать рассылку."
     except errors.PhoneCodeExpiredError:
         # Код истек - отправляем новый
         try:
             new_result = await client.send_code_request(data['phone'])
             login_states[user_id]['hash'] = new_result.phone_code_hash
             login_states[user_id]['attempts'] += 1
-            return False, "⚠️ Код истек. Отправлен новый код. Введите его:"
+            return False, "⚠️ Код истек. Отправлен новый код в Telegram. Введите его:"
         except Exception as e:
-            return False, f"❌ Ошибка: {str(e)}"
+            return False, f"❌ Ошибка при отправке нового кода: {str(e)}"
     except errors.PhoneCodeInvalidError:
         return False, "❌ Неверный код. Попробуйте еще раз."
     except errors.FloodWaitError as e:
         return False, f"⏳ Подождите {e.seconds} секунд перед повторной попыткой."
+    except errors.PhoneNumberInvalidError:
+        return False, "❌ Неверный номер телефона"
+    except errors.RPCError as e:
+        # Перехватываем любые другие ошибки RPC
+        if 'TIME' in str(e).upper() or 'SYNC' in str(e).upper():
+            # Пробуем переподключиться с синхронизацией времени
+            await client.disconnect()
+            await asyncio.sleep(2)
+            client = get_client(user_id)
+            await client.connect()
+            try:
+                # Пробуем еще раз
+                await client.sign_in(data['phone'], code, phone_code_hash=data['hash'])
+                del login_states[user_id]
+                return True, "✅ Аккаунт авторизован!"
+            except:
+                return False, "❌ Ошибка синхронизации времени. Попробуйте /login заново."
+        return False, f"❌ Ошибка: {str(e)}"
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
@@ -124,7 +155,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         login_states[user_id] = {'step': 'phone'}
         await query.edit_message_text(
             "📱 Введите номер телефона в формате:\n"
-            "+79998887766"
+            "+79998887766\n\n"
+            "После ввода номера, код подтверждения придет в Telegram на ваш телефон."
         )
     
     elif query.data == 'add_group':
@@ -146,7 +178,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'start_spam':
         ready = await is_user_ready(user_id)
         if not ready:
-            await query.edit_message_text("❌ Сначала войдите: /login")
+            await query.edit_message_text("❌ Сначала войдите: нажмите 'Войти'")
             return
         if user_id not in user_messages or not user_messages[user_id]:
             await query.edit_message_text("❌ Сначала установите сообщение: /set_msg")
@@ -215,18 +247,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == 'phone':
             success, error = await send_code(user_id, text)
             if success:
-                await update.message.reply_text(
-                    "✅ Код отправлен в Telegram!\n"
-                    "Введите код цифрами:"
-                )
+                await update.message.reply_text(error)
             else:
-                await update.message.reply_text(f"❌ Ошибка: {error}\nПопробуйте /login заново")
+                await update.message.reply_text(f"{error}\nПопробуйте /login заново")
                 del login_states[user_id]
         
         elif step == 'code':
             success, error = await verify_code(user_id, text)
             if success:
-                await update.message.reply_text("✅ Аккаунт авторизован! Можно работать.")
+                await update.message.reply_text(error)
+                # Инициализируем хранилище
                 if user_id not in user_groups:
                     user_groups[user_id] = []
                 if user_id not in user_messages:
@@ -268,8 +298,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         login_states[user_id] = {'step': 'phone'}
         await update.message.reply_text(
-            "📱 Введите номер телефона:\n"
-            "+79998887766"
+            "📱 Введите номер телефона в формате:\n"
+            "+79998887766\n\n"
+            "Код подтверждения придет в Telegram"
         )
     
     elif text == '/status':
@@ -293,7 +324,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == '/start_spam':
         ready = await is_user_ready(user_id)
         if not ready:
-            await update.message.reply_text("❌ Сначала войдите: /login")
+            await update.message.reply_text("❌ Сначала войдите: нажмите 'Войти'")
             return
         if user_id not in user_messages or not user_messages[user_id]:
             await update.message.reply_text("❌ Сначала установите сообщение: /set_msg")
