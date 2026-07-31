@@ -95,10 +95,9 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ===== QR-КОД (РАБОЧАЯ ВЕРСИЯ) =====
+# ===== QR-КОД =====
 async def generate_qr_code(user_id):
     try:
-        # Создаем клиент для QR-входа
         client = TelegramClient(
             StringSession(),
             API_ID, API_HASH,
@@ -107,11 +106,8 @@ async def generate_qr_code(user_id):
             app_version="4.16.30"
         )
         await client.connect()
-        
-        # Запрашиваем QR-логин
         qr_login = await client.qr_login()
         
-        # Сохраняем в данных пользователя
         user = get_user_data(user_id)
         user['qr_session'] = {
             'client': client,
@@ -120,7 +116,6 @@ async def generate_qr_code(user_id):
         }
         user['qr_checked'] = False
         
-        # Генерируем QR-код
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(qr_login.url)
         qr.make(fit=True)
@@ -272,6 +267,24 @@ async def send_message_with_signature(client, chat_id, message):
         except:
             return False
 
+# ===== ФУНКЦИЯ ОТПРАВКИ НОВОГО СООБЩЕНИЯ =====
+async def send_new_message(target, text, reply_markup=None, parse_mode='Markdown', is_callback=False):
+    """Отправляет новое сообщение вместо редактирования"""
+    if is_callback:
+        await target.message.reply_text(
+            text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+        # Удаляем старое сообщение
+        await target.message.delete()
+    else:
+        await target.reply_text(
+            text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+
 # ===== ГЛАВНОЕ МЕНЮ =====
 async def show_main_menu(update, context, is_callback=False):
     keyboard = [
@@ -319,11 +332,12 @@ async def show_main_menu(update, context, is_callback=False):
                 )
     else:
         if is_callback:
-            await update.callback_query.edit_message_text(
+            await update.callback_query.message.reply_text(
                 text,
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
+            await update.callback_query.message.delete()
         else:
             await update.message.reply_text(
                 text,
@@ -348,11 +362,12 @@ async def show_subscription_required(update, is_callback=False):
     )
     
     if is_callback:
-        await update.callback_query.edit_message_text(
+        await update.callback_query.message.reply_text(
             text,
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
+        await update.callback_query.message.delete()
     else:
         await update.message.reply_text(
             text,
@@ -391,7 +406,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.answer()
-            await query.edit_message_text(
+            await query.message.reply_text(
                 "❌ *Вы не подписаны на канал!*\n\n"
                 "1. Нажмите *'Подписаться на канал'*\n"
                 "2. Подпишитесь\n"
@@ -399,6 +414,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
+            await query.message.delete()
             return
         
         if user['subscription_attempts'] >= 2:
@@ -410,7 +426,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== ПРОВЕРКА ПОДПИСКИ ДЛЯ ВСЕХ ОСТАЛЬНЫХ ДЕЙСТВИЙ =====
     if not user['is_subscribed']:
         await query.answer()
-        await query.edit_message_text("⚠️ Для использования бота подпишитесь на канал.")
+        await query.message.reply_text("⚠️ Для использования бота подпишитесь на канал.")
         await show_subscription_required(update, is_callback=True)
         return
     
@@ -419,37 +435,42 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == 'qr_help':
         msg = await get_qr_instructions()
-        await query.edit_message_text(msg, parse_mode='Markdown')
+        await query.message.reply_text(msg, parse_mode='Markdown')
+        await query.message.delete()
     
     elif query.data == 'qr_login':
         success, img_bytes, url = await generate_qr_code(user_id)
         if success:
-            # Сначала редактируем сообщение с инструкцией
-            await query.edit_message_text(
+            # Отправляем инструкцию
+            await query.message.reply_text(
                 "📱 *Сканируй QR-код*\n\n"
                 "Telegram → Настройки → Устройства → Добавить устройство\n\n"
                 "⏳ Действует: 60 секунд",
                 parse_mode='Markdown'
             )
-            # Затем отправляем QR-код как отдельное фото
+            # Отправляем QR-код
             await query.message.reply_photo(
                 photo=img_bytes,
                 caption="📸 Отсканируй QR-код для входа"
             )
-            # Запускаем проверку статуса
+            # Удаляем старое сообщение
+            await query.message.delete()
+            # Запускаем проверку
             asyncio.create_task(check_qr_status(query, user_id))
         else:
-            await query.edit_message_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
+            await query.message.reply_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
+            await query.message.delete()
     
     elif query.data == 'phone_login':
         user['login_state'] = {'step': 'phone'}
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📱 Введите номер телефона:\n"
             "Пример: `+998901234567`\n\n"
             "Код придет в Telegram\n\n"
             "⚠️ *Если вход по номеру не работает, используйте QR-код*",
             parse_mode='Markdown'
         )
+        await query.message.delete()
     
     elif query.data == 'add_group':
         keyboard = [
@@ -458,7 +479,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📤 *Добавление группы*\n\n"
             "✏️ Впишите *username* или *ссылку* на группу,\n"
             "в которую вы будете отправлять сообщения.\n\n"
@@ -469,6 +490,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
+        await query.message.delete()
     
     elif query.data == 'set_msg':
         keyboard = [
@@ -477,7 +499,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await query.edit_message_text(
+        await query.message.reply_text(
             "📝 *Установка сообщения*\n\n"
             "✏️ Введите текст сообщения,\n"
             "которое будет отправляться в группы.\n\n"
@@ -487,6 +509,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
+        await query.message.delete()
     
     elif query.data == 'back_to_menu':
         await show_main_menu(update, context, is_callback=True)
@@ -496,7 +519,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'stop_spam':
         user['spamming'] = False
-        await query.edit_message_text("🛑 Рассылка остановлена", parse_mode='Markdown')
+        await query.message.reply_text("🛑 Рассылка остановлена", parse_mode='Markdown')
+        await query.message.delete()
     
     elif query.data == 'status':
         ready = await is_user_ready(user_id)
@@ -514,7 +538,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Рассылка: {'🔄 Активна' if spam_active else '⏸ Остановлена'}\n"
             f"🔗 Подпись: [🤖 Бот]({BOT_LINK})"
         )
-        await query.edit_message_text(text, parse_mode='Markdown')
+        await query.message.reply_text(text, parse_mode='Markdown')
+        await query.message.delete()
     
     elif query.data == 'groups':
         groups = user.get('groups', [])
@@ -522,14 +547,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📭 Нет групп. Добавьте через '➕ Добавить группу'"
         else:
             text = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups])
-        await query.edit_message_text(text, parse_mode='Markdown')
+        await query.message.reply_text(text, parse_mode='Markdown')
+        await query.message.delete()
 
 # ===== ЗАПУСК РАССЫЛКИ =====
 async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
     if is_callback:
         query = update.callback_query
         user_id = query.from_user.id
-        reply = query.edit_message_text
+        reply = query.message.reply_text
     else:
         user_id = update.effective_user.id
         reply = update.message.reply_text
@@ -538,18 +564,26 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     
     if not await is_user_ready(user_id):
         await reply("❌ Сначала войдите в аккаунт")
+        if is_callback:
+            await query.message.delete()
         return
     
     if not user.get('message'):
         await reply("❌ Сначала установите сообщение через '📝 Установить сообщение'")
+        if is_callback:
+            await query.message.delete()
         return
     
     if not user.get('groups'):
         await reply("❌ Сначала добавьте группы через '➕ Добавить группу'")
+        if is_callback:
+            await query.message.delete()
         return
     
     if user.get('spamming', False):
         await reply("⚠️ Рассылка уже идет!")
+        if is_callback:
+            await query.message.delete()
         return
     
     user['spamming'] = True
@@ -592,6 +626,9 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     
     user['spamming'] = False
     await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
+    
+    if is_callback:
+        await query.message.delete()
 
 # ===== ОБРАБОТЧИК СООБЩЕНИЙ =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -748,7 +785,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен с QR-входом!")
+    print("✅ Бот запущен!")
     print(f"🔗 Подпись: {BOT_LINK}")
     if os.path.exists(PHOTO_PATH):
         print(f"📷 Фото {PHOTO_PATH} будет отправлено с главным меню")
