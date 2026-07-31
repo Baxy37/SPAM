@@ -1,0 +1,20 @@
+# Файлы сессий
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+
+# Виртуальное окружение
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Файлы окружения
+.env
