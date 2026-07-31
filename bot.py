@@ -98,6 +98,7 @@ async def is_user_ready(user_id):
 # ===== QR-КОД =====
 async def generate_qr_code(user_id):
     try:
+        # Создаем НОВЫЙ клиент для QR-входа
         client = TelegramClient(
             StringSession(),
             API_ID, API_HASH,
@@ -106,8 +107,11 @@ async def generate_qr_code(user_id):
             app_version="4.16.30"
         )
         await client.connect()
+        
+        # Запрашиваем QR-логин
         qr_login = await client.qr_login()
         
+        # Сохраняем в данных пользователя
         user = get_user_data(user_id)
         user['qr_session'] = {
             'client': client,
@@ -116,6 +120,7 @@ async def generate_qr_code(user_id):
         }
         user['qr_checked'] = False
         
+        # Генерируем QR-код
         qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_L, box_size=10, border=4)
         qr.add_data(qr_login.url)
         qr.make(fit=True)
@@ -420,7 +425,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success, img_bytes, url = await generate_qr_code(user_id)
         if success:
             await query.edit_message_text(
-                "📱 *Сканируй QR-код*\n\nTelegram → Настройки → Устройства → Добавить устройство\n\n⏳ Действует: 60 секунд",
+                "📱 *Сканируй QR-код*\n\n"
+                "Telegram → Настройки → Устройства → Добавить устройство\n\n"
+                "⏳ Действует: 60 секунд",
                 parse_mode='Markdown'
             )
             await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
@@ -431,7 +438,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'phone_login':
         user['login_state'] = {'step': 'phone'}
         await query.edit_message_text(
-            "📱 Введите номер телефона:\nПример: `+998901234567`\n\nКод придет в Telegram\n\n⚠️ *Если вход по номеру не работает, используйте QR-код*",
+            "📱 Введите номер телефона:\n"
+            "Пример: `+998901234567`\n\n"
+            "Код придет в Telegram\n\n"
+            "⚠️ *Если вход по номеру не работает, используйте QR-код*",
             parse_mode='Markdown'
         )
     
@@ -732,7 +742,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен (БЫСТРЫЙ РЕЖИМ)!")
+    print("✅ Бот запущен!")
     print(f"🔗 Подпись: {BOT_LINK}")
     if os.path.exists(PHOTO_PATH):
         print(f"📷 Фото {PHOTO_PATH} будет отправлено с главным меню")
