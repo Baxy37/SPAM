@@ -24,9 +24,6 @@ SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 # Хранилище пользователей
 user_data = {}
 
-# Путь к фото
-PHOTO_PATH = 'M.png'
-
 # ===== ВЕБ-СЕРВЕР =====
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -131,7 +128,6 @@ async def generate_qr_code(user_id):
         return False, None, str(e)
 
 async def check_qr_login(user_id):
-    """Проверяет статус QR-входа"""
     user = get_user_data(user_id)
     qr_data = user.get('qr_session')
     if not qr_data:
@@ -154,7 +150,6 @@ async def check_qr_login(user_id):
         else:
             return False, "⏳ Ожидание сканирования..."
     except Exception as e:
-        # Если ошибка - проверяем, может вход уже выполнен
         try:
             if await user['qr_session']['client'].is_user_authorized():
                 client = user['qr_session']['client']
@@ -173,30 +168,24 @@ async def check_qr_login(user_id):
         return False, f"❌ Ошибка: {str(e)}"
 
 async def check_qr_status(query, user_id):
-    """Проверяет статус QR-входа с улучшенной логикой"""
     user = get_user_data(user_id)
     
-    # Проверяем 10 раз с интервалом 3 секунды (30 секунд)
     for i in range(10):
         await asyncio.sleep(3)
         
-        # Сначала проверяем, не авторизован ли уже пользователь
         if user.get('client') and await is_user_ready(user_id):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Проверяем статус QR
         success, msg = await check_qr_login(user_id)
         if success:
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
         
-        # Если видим, что сессия сохранена - значит вход выполнен
         if user.get('session'):
             await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
             return
     
-    # Если не удалось - проверяем последний раз через is_user_ready
     if await is_user_ready(user_id):
         await query.message.reply_text("✅ QR-вход успешен! Аккаунт авторизован.")
         return
@@ -276,41 +265,7 @@ async def send_message_with_signature(client, chat_id, message):
         except:
             return False
 
-# ===== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ОТПРАВКИ С ФОТО =====
-async def send_with_photo(target, text, reply_markup=None, parse_mode='Markdown', is_callback=False):
-    if os.path.exists(PHOTO_PATH):
-        with open(PHOTO_PATH, 'rb') as photo:
-            if is_callback:
-                await target.message.reply_photo(
-                    photo=photo,
-                    caption=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup
-                )
-                await target.message.delete()
-            else:
-                await target.reply_photo(
-                    photo=photo,
-                    caption=text,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup
-                )
-    else:
-        if is_callback:
-            await target.message.reply_text(
-                text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup
-            )
-            await target.message.delete()
-        else:
-            await target.reply_text(
-                text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup
-            )
-
-# ===== ГЛАВНОЕ МЕНЮ =====
+# ===== ГЛАВНОЕ МЕНЮ (БЫСТРО) =====
 async def show_main_menu(update, context, is_callback=False):
     keyboard = [
         [InlineKeyboardButton("📱 Вход по QR", callback_data='qr_login')],
@@ -339,9 +294,17 @@ async def show_main_menu(update, context, is_callback=False):
     )
     
     if is_callback:
-        await send_with_photo(update.callback_query, text, reply_markup, is_callback=True)
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
     else:
-        await send_with_photo(update.message, text, reply_markup)
+        await update.message.reply_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 async def show_subscription_required(update, is_callback=False):
     keyboard = [
@@ -358,9 +321,17 @@ async def show_subscription_required(update, is_callback=False):
     )
     
     if is_callback:
-        await send_with_photo(update.callback_query, text, reply_markup, is_callback=True)
+        await update.callback_query.edit_message_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
     else:
-        await send_with_photo(update.message, text, reply_markup)
+        await update.message.reply_text(
+            text,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
 
 # ===== КОМАНДА /start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,7 +346,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await show_subscription_required(update, is_callback=False)
 
-# ===== ОБРАБОТЧИК КНОПОК =====
+# ===== ОБРАБОТЧИК КНОПОК (МГНОВЕННЫЙ) =====
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -416,32 +387,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_subscription_required(update, is_callback=True)
         return
     
-    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
+    # ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (МГНОВЕННО) =====
     await query.answer()
     
     if query.data == 'qr_help':
         msg = await get_qr_instructions()
-        await send_with_photo(query, msg, is_callback=True)
+        await query.edit_message_text(msg, parse_mode='Markdown')
     
     elif query.data == 'qr_login':
         success, img_bytes, url = await generate_qr_code(user_id)
         if success:
-            await send_with_photo(
-                query,
+            await query.edit_message_text(
                 "📱 *Сканируй QR-код*\n\nTelegram → Настройки → Устройства → Добавить устройство\n\n⏳ Действует: 60 секунд",
-                is_callback=True
+                parse_mode='Markdown'
             )
             await query.message.reply_photo(photo=img_bytes, caption="📸 Отсканируй QR-код для входа")
             asyncio.create_task(check_qr_status(query, user_id))
         else:
-            await send_with_photo(query, f"❌ Ошибка: {url}", is_callback=True)
+            await query.edit_message_text(f"❌ Ошибка: {url}", parse_mode='Markdown')
     
     elif query.data == 'phone_login':
         user['login_state'] = {'step': 'phone'}
-        await send_with_photo(
-            query,
+        await query.edit_message_text(
             "📱 Введите номер телефона:\nПример: `+998901234567`\n\nКод придет в Telegram\n\n⚠️ *Если вход по номеру не работает, используйте QR-код*",
-            is_callback=True
+            parse_mode='Markdown'
         )
     
     elif query.data == 'add_group':
@@ -451,8 +420,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await send_with_photo(
-            query,
+        await query.edit_message_text(
             "📤 *Добавление группы*\n\n"
             "✏️ Впишите *username* или *ссылку* на группу,\n"
             "в которую вы будете отправлять сообщения.\n\n"
@@ -460,8 +428,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• `@durov`\n"
             "• `https://t.me/durov`\n\n"
             "👇 Нажмите кнопку и введите данные:",
-            reply_markup=reply_markup,
-            is_callback=True
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
     
     elif query.data == 'set_msg':
@@ -471,16 +439,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        await send_with_photo(
-            query,
+        await query.edit_message_text(
             "📝 *Установка сообщения*\n\n"
             "✏️ Введите текст сообщения,\n"
             "которое будет отправляться в группы.\n\n"
             "📌 *Пример:*\n"
             "`Всем привет! Это тестовое сообщение.`\n\n"
             "👇 Нажмите кнопку и введите текст:",
-            reply_markup=reply_markup,
-            is_callback=True
+            parse_mode='Markdown',
+            reply_markup=reply_markup
         )
     
     elif query.data == 'back_to_menu':
@@ -491,7 +458,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == 'stop_spam':
         user['spamming'] = False
-        await send_with_photo(query, "🛑 Рассылка остановлена", is_callback=True)
+        await query.edit_message_text("🛑 Рассылка остановлена", parse_mode='Markdown')
     
     elif query.data == 'status':
         ready = await is_user_ready(user_id)
@@ -509,7 +476,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Рассылка: {'🔄 Активна' if spam_active else '⏸ Остановлена'}\n"
             f"🔗 Подпись: [🤖 Бот]({BOT_LINK})"
         )
-        await send_with_photo(query, text, is_callback=True)
+        await query.edit_message_text(text, parse_mode='Markdown')
     
     elif query.data == 'groups':
         groups = user.get('groups', [])
@@ -517,34 +484,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📭 Нет групп. Добавьте через '➕ Добавить группу'"
         else:
             text = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups])
-        await send_with_photo(query, text, is_callback=True)
+        await query.edit_message_text(text, parse_mode='Markdown')
 
 # ===== ЗАПУСК РАССЫЛКИ =====
 async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
     if is_callback:
         query = update.callback_query
         user_id = query.from_user.id
-        send_func = lambda text, markup=None: send_with_photo(query, text, markup, is_callback=True)
+        reply = query.edit_message_text
     else:
         user_id = update.effective_user.id
-        send_func = lambda text, markup=None: send_with_photo(update.message, text, markup)
+        reply = update.message.reply_text
     
     user = get_user_data(user_id)
     
     if not await is_user_ready(user_id):
-        await send_func("❌ Сначала войдите в аккаунт")
+        await reply("❌ Сначала войдите в аккаунт")
         return
     
     if not user.get('message'):
-        await send_func("❌ Сначала установите сообщение через '📝 Установить сообщение'")
+        await reply("❌ Сначала установите сообщение через '📝 Установить сообщение'")
         return
     
     if not user.get('groups'):
-        await send_func("❌ Сначала добавьте группы через '➕ Добавить группу'")
+        await reply("❌ Сначала добавьте группы через '➕ Добавить группу'")
         return
     
     if user.get('spamming', False):
-        await send_func("⚠️ Рассылка уже идет!")
+        await reply("⚠️ Рассылка уже идет!")
         return
     
     user['spamming'] = True
@@ -552,15 +519,15 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     groups = user['groups'].copy()
     msg = user['message']
     
-    await send_func(f"🚀 Начинаю рассылку в {len(groups)} групп...")
-    await send_func(f"📨 В конце каждого сообщения будет подпись: [🤖 Бот]({BOT_LINK})")
+    await reply(f"🚀 Начинаю рассылку в {len(groups)} групп...")
+    await reply(f"📨 В конце каждого сообщения будет подпись: [🤖 Бот]({BOT_LINK})", parse_mode='Markdown')
     
     sent = 0
     errors = 0
     
     for i, group in enumerate(groups, 1):
         if not user['spamming']:
-            await send_func(f"🛑 Остановлено. Отправлено: {sent}")
+            await reply(f"🛑 Остановлено. Отправлено: {sent}")
             break
         
         try:
@@ -570,10 +537,10 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
             else:
                 errors += 1
             if i % 5 == 0:
-                await send_func(f"✅ {i}/{len(groups)} отправлено")
+                await reply(f"✅ {i}/{len(groups)} отправлено")
         except errors.FloodWaitError as e:
             wait_time = e.seconds + 2
-            await send_func(f"⏳ Ожидание {wait_time} сек (флуд)...")
+            await reply(f"⏳ Ожидание {wait_time} сек (флуд)...")
             await asyncio.sleep(wait_time)
             success = await send_message_with_signature(client, group, msg)
             if success:
@@ -586,16 +553,16 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
         await asyncio.sleep(3)
     
     user['spamming'] = False
-    await send_func(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
+    await reply(f"✅ Готово! Отправлено: {sent}, ошибок: {errors}")
 
-# ===== ОБРАБОТЧИК СООБЩЕНИЙ =====
+# ===== ОБРАБОТЧИК СООБЩЕНИЙ (БЫСТРЫЙ) =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
     user = get_user_data(user_id)
     
     if not user['is_subscribed'] and text not in ['/start', '/help']:
-        await send_with_photo(update.message, "⚠️ Для использования бота подпишитесь на спонсора. Используйте /start")
+        await update.message.reply_text("⚠️ Для использования бота подпишитесь на спонсора. Используйте /start")
         return
     
     if user.get('login_state'):
@@ -604,16 +571,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == 'phone':
             success, msg = await send_code_phone(user_id, text)
             if success:
-                await send_with_photo(update.message, msg + "\nВведите код из Telegram:")
+                await update.message.reply_text(msg + "\nВведите код из Telegram:")
             else:
-                await send_with_photo(update.message, f"{msg}\nПопробуйте /start")
+                await update.message.reply_text(f"{msg}\nПопробуйте /start")
                 user['login_state'] = None
             return
         
         elif step == 'code':
             success, msg = await verify_code_phone(user_id, text)
             if success:
-                await send_with_photo(update.message, msg)
+                await update.message.reply_text(msg)
                 if not user.get('groups'):
                     user['groups'] = []
                 if not user.get('message'):
@@ -622,13 +589,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     user['spamming'] = False
                 user['login_state'] = None
             else:
-                await send_with_photo(update.message, msg)
+                await update.message.reply_text(msg)
             return
     
     if text.startswith('/add_group'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_with_photo(update.message, "❌ Введите username группы после команды.\nПример: `/add_group @durov`")
+            await update.message.reply_text("❌ Введите username группы после команды.\nПример: `/add_group @durov`")
             return
         
         group = parts[1].strip()
@@ -636,22 +603,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             group = '@' + group
         
         if group in user.get('groups', []):
-            await send_with_photo(update.message, f"⚠️ {group} уже в списке")
+            await update.message.reply_text(f"⚠️ {group} уже в списке")
         else:
             user['groups'].append(group)
-            await send_with_photo(update.message, f"✅ Добавлен {group} | Всего: {len(user['groups'])}")
+            await update.message.reply_text(f"✅ Добавлен {group} | Всего: {len(user['groups'])}")
         return
     
     if text.startswith('/set_msg'):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
-            await send_with_photo(update.message, "❌ Введите текст сообщения после команды.\nПример: `/set_msg Всем привет!`")
+            await update.message.reply_text("❌ Введите текст сообщения после команды.\nПример: `/set_msg Всем привет!`")
             return
         
         user['message'] = parts[1].strip()
-        await send_with_photo(
-            update.message,
-            f"✅ Сообщение сохранено!\n\n📨 В конце будет подпись: [🤖 Бот]({BOT_LINK})"
+        await update.message.reply_text(
+            f"✅ Сообщение сохранено!\n\n📨 В конце будет подпись: [🤖 Бот]({BOT_LINK})",
+            parse_mode='Markdown'
         )
         return
     
@@ -660,8 +627,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if text == '/help':
-        await send_with_photo(
-            update.message,
+        await update.message.reply_text(
             "📋 *Команды:*\n\n"
             "/start - Главное меню\n"
             "/add_group @name - Добавить группу\n"
@@ -670,7 +636,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/stop_spam - Остановить\n"
             "/status - Статус\n"
             "/groups - Список групп\n"
-            "/help - Помощь"
+            "/help - Помощь",
+            parse_mode='Markdown'
         )
         return
     
@@ -690,7 +657,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Рассылка: {'🔄 Активна' if spam_active else '⏸ Остановлена'}\n"
             f"🔗 Подпись: [🤖 Бот]({BOT_LINK})"
         )
-        await send_with_photo(update.message, text)
+        await update.message.reply_text(text, parse_mode='Markdown')
         return
     
     if text == '/groups':
@@ -699,7 +666,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "📭 Нет групп"
         else:
             text = f"📋 *Группы ({len(groups)}):*\n\n" + "\n".join([f"• {g}" for g in groups])
-        await send_with_photo(update.message, text)
+        await update.message.reply_text(text, parse_mode='Markdown')
         return
     
     if text == '/start_spam':
@@ -708,10 +675,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if text == '/stop_spam':
         user['spamming'] = False
-        await send_with_photo(update.message, "🛑 Рассылка остановлена")
+        await update.message.reply_text("🛑 Рассылка остановлена")
         return
     
-    await send_with_photo(update.message, "ℹ️ Неизвестная команда. Используй /help")
+    await update.message.reply_text("ℹ️ Неизвестная команда. Используй /help")
 
 # ===== ЗАПУСК =====
 def main():
@@ -743,12 +710,8 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("✅ Бот запущен!")
+    print("✅ Бот запущен (БЫСТРЫЙ РЕЖИМ)!")
     print(f"🔗 Подпись: {BOT_LINK}")
-    if os.path.exists(PHOTO_PATH):
-        print(f"📷 Фото {PHOTO_PATH} загружено")
-    else:
-        print(f"⚠️ Фото {PHOTO_PATH} не найдено")
     app.run_polling()
 
 if __name__ == "__main__":
