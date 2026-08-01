@@ -29,7 +29,7 @@ BOT_USERNAME = 'vvfvdfdfbbxng_bot'
 BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 PHOTO_PATH = 'M.png'
-ADMIN_ID = 6378686913  # Замените на ваш ID
+ADMIN_ID = 8551946505  # ВАШ ID АДМИНИСТРАТОРА
 
 PORT = int(os.environ.get('PORT', 8080))
 
@@ -371,7 +371,7 @@ async def finish_phone_with_password(user_id, password, context):
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === РАССЫЛКА (с фото) ===
+# === РАССЫЛКА ===
 async def send_message_with_signature(client, chat_id, message, photo_file_id=None):
     signed = f"{message}\n\n—\n📨 Отправлено через [🤖 Бот]({BOT_LINK})"
     try:
@@ -776,7 +776,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user_data(user_id)
     chat_id = update.effective_chat.id
 
-    # Обработка состояний входа
     if user.get('login_state'):
         step = user['login_state']['step']
         if step == 'phone':
@@ -817,7 +816,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update, context)
             return
 
-    # Обработка ожиданий ввода (группа или сообщение)
     if user.get('awaiting_group'):
         user['awaiting_group'] = False
         if not text:
@@ -842,7 +840,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_with_back(update, f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})")
         return
 
-    # Обработка фото
     if update.message.photo:
         photo_file_id = update.message.photo[-1].file_id
         user['photo_file_id'] = photo_file_id
@@ -852,12 +849,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               (f"\nТекст: {user['message'][:50]}..." if user.get('message') else ""))
         return
 
-    # Проверка подписки
     if not user['is_subscribed']:
         await update.message.reply_text("⚠️ Подпишитесь на канал. /start")
         return
 
-    # Разбор команд
     if text and text.startswith('/'):
         parts = text.split(maxsplit=1)
         raw_cmd = parts[0].strip()
@@ -945,7 +940,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ЗАПУСК ===
 def main():
-    # Загрузка сохранённых сессий
     for file in os.listdir('.'):
         if file.startswith('session_string_') and file.endswith('.txt'):
             try:
